@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
 
+import io.airlift.compress.lzo.LzoDecompressor;
 import io.airlift.compress.zstd.ZstdDecompressor;
 import org.jnode.util.LittleEndian;
 
@@ -119,7 +120,7 @@ final class BtrfsFileContent {
     /** The bytes of one extent (inline data or the on-disk range), decompressed if compressed. */
     private static byte[] materialise(BtrfsVolume vol, Extent e) throws IOException {
         if (e.type == BtrfsConstants.EXTENT_TYPE_INLINE) {
-            return decompress(e.compression, e.inlineData, (int) e.ramBytes);
+            return decompress(e.compression, e.inlineData, (int) e.ramBytes, vol.sectorSize());
         }
         if (e.diskBytenr == 0) {
             return new byte[0]; // an explicit hole
@@ -127,11 +128,16 @@ final class BtrfsFileContent {
         long physical = vol.chunkMap().toPhysical(e.diskBytenr);
         byte[] raw = vol.reader().read(physical, (int) e.diskNumBytes);
         // for a compressed extent, disk holds the whole compressed extent; decompress fully then slice
-        return decompress(e.compression, raw, (int) e.ramBytes);
+        return decompress(e.compression, raw, (int) e.ramBytes, vol.sectorSize());
+    }
+
+    /** Convenience for callers/tests that don't care about the sector size (only lzo uses it). */
+    static byte[] decompress(int compression, byte[] input, int ramBytes) throws IOException {
+        return decompress(compression, input, ramBytes, 4096);
     }
 
     /** Decompress a whole extent to its uncompressed length ({@code ram_bytes}); NONE returns input. */
-    static byte[] decompress(int compression, byte[] input, int ramBytes) throws IOException {
+    static byte[] decompress(int compression, byte[] input, int ramBytes, int sectorSize) throws IOException {
         switch (compression) {
             case BtrfsConstants.COMPRESS_NONE:
                 return input;
@@ -140,9 +146,58 @@ final class BtrfsFileContent {
             case BtrfsConstants.COMPRESS_ZSTD:
                 return inflateZstd(input, ramBytes);
             case BtrfsConstants.COMPRESS_LZO:
-                throw new IOException("btrfs lzo-compressed content is not supported for reading");
+                return inflateLzo(input, ramBytes, sectorSize);
             default:
                 throw new IOException("btrfs unknown compression " + compression);
+        }
+    }
+
+    /**
+     * Decompress an lzo extent. btrfs frames the {@code lzo1x} blocks itself: a 4-byte LE total
+     * length (including the header), then segments — each a 4-byte LE payload length followed by an
+     * {@code lzo1x} block that decodes to at most one sector. A segment's length header never crosses a
+     * sector boundary, so up to 3 zero bytes can pad a sector's tail; we skip them before reading the
+     * next header (payloads themselves may span sectors). Returns the leading {@code ramBytes}.
+     */
+    private static byte[] inflateLzo(byte[] input, int ramBytes, int sectorSize) throws IOException {
+        if (ramBytes <= 0) {
+            return new byte[0];
+        }
+        final int lzoLen = 4; // btrfs LZO_LEN: the width of the total and per-segment length headers
+        if (input.length < lzoLen || sectorSize < lzoLen) {
+            throw new IOException("btrfs lzo: truncated header");
+        }
+        long totalLen = Math.min(LittleEndian.getUInt32(input, 0), input.length);
+        byte[] out = new byte[ramBytes];
+        byte[] segOut = new byte[sectorSize]; // a segment decodes to at most one sector
+        LzoDecompressor lzo = new LzoDecompressor();
+        int cur = lzoLen; // past the total-length header
+        int outPos = 0;
+        try {
+            while (cur < totalLen && outPos < ramBytes) {
+                int sectorLeft = sectorSize - (cur % sectorSize);
+                if (sectorLeft < lzoLen) {
+                    cur += sectorLeft; // a segment header never straddles a sector: skip the padding
+                    continue;
+                }
+                if (cur + lzoLen > totalLen) {
+                    break;
+                }
+                int segLen = (int) LittleEndian.getUInt32(input, cur);
+                cur += lzoLen;
+                if (segLen <= 0 || cur + segLen > input.length) {
+                    break; // corrupt / truncated segment
+                }
+                int n = lzo.decompress(input, cur, segLen, segOut, 0, segOut.length);
+                cur += segLen;
+                int copy = Math.min(n, ramBytes - outPos);
+                System.arraycopy(segOut, 0, out, outPos, copy);
+                outPos += copy;
+            }
+            return out;
+        } catch (RuntimeException ex) {
+            // aircompressor signals bad data with MalformedInputException (a RuntimeException)
+            throw new IOException("btrfs lzo inflate failed: " + ex.getMessage(), ex);
         }
     }
 
