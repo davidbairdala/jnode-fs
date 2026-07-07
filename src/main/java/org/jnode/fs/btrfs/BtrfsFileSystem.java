@@ -37,6 +37,14 @@ public class BtrfsFileSystem extends AbstractFileSystem<BtrfsEntry> {
         return volume;
     }
 
+    /**
+     * Descend into snapshot subvolumes (default: skipped, so a snapper/openSUSE root isn't inflated
+     * by dozens of near-identical snapshots). Call before walking the tree.
+     */
+    public void setDescendSnapshots(boolean descend) {
+        volume.setDescendSnapshots(descend);
+    }
+
     @Override
     protected BtrfsEntry createRootEntry() throws IOException {
         return new BtrfsEntry(volume.getRoot(), "/", this, null);
