@@ -20,6 +20,10 @@ default to btrfs — jnode-fs previously had no btrfs support).
   jnode timestamp interfaces (`getLastModified`, `FSEntryCreated`/`LastAccessed`/`LastChanged`) and
   a volume-unique id (`subvolId-objectId` — plain objectids repeat in every subvolume). The volume
   label (`mkfs.btrfs -L`) is reported via `getVolumeName()`.
+- Extended attributes: `BtrfsEntry.getAttributes()` (mirroring `XfsEntry`) returns each inode's
+  xattrs — SELinux context, `user.*`, POSIX ACLs, capabilities, btrfs per-file properties — via a
+  keyed `XATTR_ITEM` lookup. Values are always inline; hash-colliding names packed into one item
+  are handled.
 - Keyed B-tree lookup (`BtrfsTree.search`): file-content reads descend to an inode's `EXTENT_DATA`
   items in O(tree depth) node reads and iterate the matching range, rather than rescanning the whole
   FS tree per open. (The size/tree build still scans once — it wants every item.) Uncompressed

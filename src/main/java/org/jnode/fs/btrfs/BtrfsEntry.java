@@ -1,5 +1,7 @@
 package org.jnode.fs.btrfs;
 
+import java.io.IOException;
+
 import org.jnode.fs.FSDirectory;
 import org.jnode.fs.FSEntryCreated;
 import org.jnode.fs.FSEntryLastAccessed;
@@ -61,5 +63,15 @@ public class BtrfsEntry extends AbstractFSEntry
     @Override
     public long getCreated() {
         return node.getCreated();
+    }
+
+    /**
+     * The entry's extended attributes, mirroring {@code XfsEntry.getAttributes()}.
+     *
+     * @return the inode's xattrs in key order; empty if none.
+     * @throws IOException if the FS tree cannot be read.
+     */
+    public java.util.List<org.jnode.fs.FSAttribute> getAttributes() throws IOException {
+        return node.getXattrs();
     }
 }

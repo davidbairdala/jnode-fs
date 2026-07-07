@@ -126,6 +126,17 @@ public class BtrfsNode {
     }
 
     /**
+     * This inode's extended attributes (xattrs): SELinux context, {@code user.*} pairs, POSIX ACLs,
+     * capabilities, btrfs per-file properties.
+     *
+     * @return the attributes in key order; empty if none.
+     * @throws IOException if the FS tree cannot be read.
+     */
+    public List<org.jnode.fs.FSAttribute> getXattrs() throws IOException {
+        return volume.listXattrs(subvolId, objectId);
+    }
+
+    /**
      * Reads up to {@code len} bytes of this file starting at {@code fileOffset}.
      *
      * @param fileOffset the byte offset within the file to start reading at.

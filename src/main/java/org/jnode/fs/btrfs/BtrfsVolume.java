@@ -261,6 +261,30 @@ public class BtrfsVolume {
         return dirId[0];
     }
 
+    /**
+     * The inode's extended attributes, fetched with a keyed search of its {@code XATTR_ITEM}s
+     * (contiguous in key order, like its extents).
+     *
+     * @param subvolId the subvolume the inode lives in.
+     * @param objectId the inode's object id.
+     * @return the attributes, in key order; empty if the inode has none.
+     * @throws IOException if the FS tree cannot be read.
+     */
+    List<org.jnode.fs.FSAttribute> listXattrs(long subvolId, long objectId) throws IOException {
+        List<org.jnode.fs.FSAttribute> result = new ArrayList<org.jnode.fs.FSAttribute>();
+        BtrfsTree.Cursor cur = tree.search(subvolBytenr(subvolId),
+                new BtrfsDiskKey(objectId, BtrfsConstants.TYPE_XATTR_ITEM, 0));
+        while (cur.valid()) {
+            BtrfsDiskKey key = cur.key();
+            if (key.getObjectId() != objectId || key.getType() != BtrfsConstants.TYPE_XATTR_ITEM) {
+                break; // walked past this inode's xattr range
+            }
+            BtrfsAttribute.parseItem(cur.data(), result);
+            cur.next();
+        }
+        return result;
+    }
+
     /** A btrfs_timespec ({@code __le64 sec; __le32 nsec;}) at {@code off}, as epoch milliseconds. */
     private static long timespecMs(byte[] data, int off) {
         if (off + 12 > data.length) {
