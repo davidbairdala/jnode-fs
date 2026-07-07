@@ -122,6 +122,10 @@ final class BtrfsFileContent {
         if (e.type == BtrfsConstants.EXTENT_TYPE_INLINE) {
             return decompress(e.compression, e.inlineData, (int) e.ramBytes, vol.sectorSize());
         }
+        if (e.type == BtrfsConstants.EXTENT_TYPE_PREALLOC) {
+            return new byte[0]; // preallocated but unwritten (fallocate) -> reads as zeros, not the
+            // stale data still sitting in the allocated-but-never-written blocks on disk
+        }
         if (e.diskBytenr == 0) {
             return new byte[0]; // an explicit hole
         }
