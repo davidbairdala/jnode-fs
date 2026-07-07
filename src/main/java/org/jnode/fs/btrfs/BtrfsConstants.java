@@ -90,6 +90,9 @@ public final class BtrfsConstants {
     public static final int ROOT_ITEM_DIRID = 0xa8;
     public static final int ROOT_ITEM_BYTENR = 0xb0;
     public static final int ROOT_ITEM_LEVEL = 0xee;
+    /** parent_uuid: non-zero iff the subvolume was created as a snapshot of another (16 bytes). */
+    public static final int ROOT_ITEM_PARENT_UUID = 0x107;
+    public static final int UUID_SIZE = 16;
 
     // ---- CHUNK_ITEM (btrfs_chunk) field offsets ----
     public static final int CHUNK_LENGTH = 0x00;

@@ -3,8 +3,10 @@ package org.jnode.fs.btrfs;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.jnode.util.LittleEndian;
 
@@ -46,8 +48,18 @@ public class BtrfsVolume {
     private final BtrfsTree tree;
     /** subvolume root objectid -> its FS tree bytenr (from the root tree's ROOT_ITEMs). */
     private final Map<Long, Long> subvolBytenr = new HashMap<Long, Long>();
+    /** subvolumes that are snapshots (ROOT_ITEM.parent_uuid != 0) — skipped by default. */
+    private final Set<Long> snapshotSubvols = new HashSet<Long>();
     /** lazily scanned subvolumes, keyed by root objectid. */
     private final Map<Long, Subvol> scanned = new HashMap<Long, Subvol>();
+    /**
+     * Whether to descend snapshot subvolumes. Off by default: a snapper/openSUSE root has dozens of
+     * read-only snapshots (each ≈ a full root copy sharing storage via CoW), so descending them all
+     * explodes the tree and massively overstates usage. Real subvolumes (root, home) are always
+     * descended — only snapshots are gated. Override with {@code -Dorg.jnode.fs.btrfs.descendSnapshots=true}
+     * or {@link #setDescendSnapshots(boolean)}.
+     */
+    private boolean descendSnapshots = Boolean.getBoolean("org.jnode.fs.btrfs.descendSnapshots");
 
     public BtrfsVolume(BtrfsBlockReader reader) throws IOException {
         this.reader = reader;
@@ -88,6 +100,9 @@ public class BtrfsVolume {
                 if (bytenr == null) {
                     continue; // subvolume not found (e.g. deleted) — skip
                 }
+                if (!descendSnapshots && snapshotSubvols.contains(e.childObjectId)) {
+                    continue; // a snapshot (parent_uuid set) — skipped unless descent is enabled
+                }
                 Subvol child = subvol(e.childObjectId);
                 result.add(new BtrfsNode(this, e.childObjectId, child.rootDirId, e.name, true, 0));
             } else {
@@ -115,9 +130,35 @@ public class BtrfsVolume {
                     long bytenr = LittleEndian.getInt64(data, BtrfsConstants.ROOT_ITEM_BYTENR);
                     // keep the highest generation if duplicated (later ROOT_ITEM wins by scan order)
                     subvolBytenr.put(id, bytenr);
+                    if (isSnapshotRootItem(data)) {
+                        snapshotSubvols.add(id);
+                    }
                 }
             }
         });
+    }
+
+    /** Enables (or disables) descending into snapshot subvolumes. Default: snapshots are skipped. */
+    public void setDescendSnapshots(boolean descend) {
+        this.descendSnapshots = descend;
+    }
+
+    /**
+     * A ROOT_ITEM is a snapshot iff its {@code parent_uuid} is non-zero — i.e. it was created as a
+     * snapshot/clone of another subvolume. Regular subvolumes ({@code btrfs subvolume create}, e.g.
+     * root/home) leave it all-zero, so they are never treated as snapshots.
+     */
+    static boolean isSnapshotRootItem(byte[] data) {
+        int off = BtrfsConstants.ROOT_ITEM_PARENT_UUID;
+        if (data.length < off + BtrfsConstants.UUID_SIZE) {
+            return false; // pre-uuid root_item (very old btrfs): nothing to distinguish
+        }
+        for (int i = 0; i < BtrfsConstants.UUID_SIZE; i++) {
+            if (data[off + i] != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Scans (once) a subvolume's FS tree into inode + children maps. */
