@@ -11,7 +11,11 @@ default to btrfs — jnode-fs previously had no btrfs support).
 - Single-device volumes (VM images are single-device). Multi-device / RAID is rejected cleanly.
 - Superblock → `sys_chunk_array` bootstrap → chunk tree → logical→physical address map.
 - Root tree → FS tree(s); descent into subvolumes (each is its own FS tree).
-- FS-tree walk: `INODE_ITEM` (size, mode), `DIR_INDEX` (directory entries).
+- FS-tree walk: `INODE_ITEM` (size, mode), `DIR_INDEX` (directory entries) — one scan per subvolume
+  builds its inode/children maps.
+- Keyed B-tree lookup (`BtrfsTree.search`): file-content reads descend to an inode's `EXTENT_DATA`
+  items in O(tree depth) node reads and iterate the matching range, rather than rescanning the whole
+  FS tree per open. (The size/tree build still scans once — it wants every item.)
 - File content: inline extents, regular extents, and zlib- and zstd-compressed extents (zstd via
   the pure-Java aircompressor decoder — the Fedora/openSUSE default, so this is the common case).
 - crc32c is the checksum; verification is optional (skipped for read-only browsing).

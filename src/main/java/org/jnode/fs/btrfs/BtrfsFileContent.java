@@ -48,14 +48,22 @@ final class BtrfsFileContent {
         }
     }
 
-    /** One FS-tree scan collecting this inode's extents (cache the result for repeated reads). */
+    /**
+     * This inode's extents, via a keyed B-tree search: descend to the first {@code EXTENT_DATA} item
+     * for the inode and walk forward while the key still matches (they are contiguous in key order),
+     * instead of scanning the whole FS tree. Cache the result for repeated reads.
+     */
     static List<Extent> collectExtents(BtrfsVolume vol, long subvolId, long objectId) throws IOException {
         final List<Extent> extents = new ArrayList<Extent>();
         long bytenr = vol.subvolBytenr(subvolId);
-        vol.tree().scanLeaves(bytenr, (key, data) -> {
-            if (key.getType() != BtrfsConstants.TYPE_EXTENT_DATA || key.getObjectId() != objectId) {
-                return;
+        BtrfsDiskKey start = new BtrfsDiskKey(objectId, BtrfsConstants.TYPE_EXTENT_DATA, 0);
+        BtrfsTree.Cursor cur = vol.tree().search(bytenr, start);
+        while (cur.valid()) {
+            BtrfsDiskKey key = cur.key();
+            if (key.getObjectId() != objectId || key.getType() != BtrfsConstants.TYPE_EXTENT_DATA) {
+                break; // walked past this inode's extent range
             }
+            byte[] data = cur.data();
             long fileOffset = key.getOffset();
             int compression = data[BtrfsConstants.EXTENT_COMPRESSION] & 0xFF;
             int type = data[BtrfsConstants.EXTENT_TYPE] & 0xFF;
@@ -71,7 +79,8 @@ final class BtrfsFileContent {
                 extents.add(new Extent(fileOffset, numBytes, ram, type, compression, diskBytenr,
                         diskNumBytes, dataOffset, null));
             }
-        });
+            cur.next();
+        }
         return extents;
     }
 
