@@ -77,6 +77,7 @@ public final class BtrfsConstants {
     public static final int S_IFMT = 0xf000;
     public static final int S_IFDIR = 0x4000;
     public static final int S_IFREG = 0x8000;
+    public static final int S_IFLNK = 0xa000;
 
     // ---- DIR_ITEM / DIR_INDEX (btrfs_dir_item) field offsets ----
     public static final int DIR_LOCATION_OBJECTID = 0x00;

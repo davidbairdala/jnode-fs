@@ -111,7 +111,9 @@ public class BtrfsVolume {
                     continue;
                 }
                 boolean isDir = info[1] != 0;
-                result.add(new BtrfsNode(this, dir.getSubvolId(), e.childObjectId, e.name, isDir, info[0]));
+                boolean isLink = info.length > 2 && info[2] != 0;
+                result.add(new BtrfsNode(this, dir.getSubvolId(), e.childObjectId, e.name, isDir,
+                        info[0], isLink));
             }
         }
         return result;
@@ -179,8 +181,10 @@ public class BtrfsVolume {
             if (type == BtrfsConstants.TYPE_INODE_ITEM) {
                 long size = LittleEndian.getInt64(data, BtrfsConstants.INODE_SIZE_OFF);
                 int mode = (int) LittleEndian.getUInt32(data, BtrfsConstants.INODE_MODE_OFF);
-                long dirFlag = (mode & BtrfsConstants.S_IFMT) == BtrfsConstants.S_IFDIR ? 1 : 0;
-                sv.inodes.put(key.getObjectId(), new long[] {size, dirFlag});
+                int fmt = mode & BtrfsConstants.S_IFMT;
+                long dirFlag = fmt == BtrfsConstants.S_IFDIR ? 1 : 0;
+                long linkFlag = fmt == BtrfsConstants.S_IFLNK ? 1 : 0;
+                sv.inodes.put(key.getObjectId(), new long[] {size, dirFlag, linkFlag});
             } else if (type == BtrfsConstants.TYPE_DIR_INDEX) {
                 DirEntry e = parseDirEntry(data);
                 if (e != null) {
