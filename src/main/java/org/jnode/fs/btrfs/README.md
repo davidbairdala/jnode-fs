@@ -10,20 +10,27 @@ default to btrfs — jnode-fs previously had no btrfs support).
 **Supported**
 - Single-device volumes (VM images are single-device). Multi-device / RAID is rejected cleanly.
 - Superblock → `sys_chunk_array` bootstrap → chunk tree → logical→physical address map.
-- Root tree → FS tree(s); descent into subvolumes (each is its own FS tree).
+- Root tree → FS tree(s); descent into real subvolumes (root, home, …). **Snapshots** (ROOT_ITEM
+  with a non-zero `parent_uuid`) are **skipped by default** — a snapper/openSUSE root has dozens,
+  each ≈ a full copy sharing storage, which would explode the tree; re-enable with
+  `setDescendSnapshots(true)` or `-Dorg.jnode.fs.btrfs.descendSnapshots=true`.
 - FS-tree walk: `INODE_ITEM` (size, mode), `DIR_INDEX` (directory entries) — one scan per subvolume
-  builds its inode/children maps.
+  builds its inode/children maps. **Symlinks** are recognised (`BtrfsNode.isSymlink()` /
+  `getSymlinkTarget()`) and never followed.
 - Keyed B-tree lookup (`BtrfsTree.search`): file-content reads descend to an inode's `EXTENT_DATA`
   items in O(tree depth) node reads and iterate the matching range, rather than rescanning the whole
   FS tree per open. (The size/tree build still scans once — it wants every item.)
 - File content: inline extents, regular extents, and zlib-, zstd- and lzo-compressed extents (zstd
   and lzo via the pure-Java aircompressor decoder). zstd is the Fedora/openSUSE default; lzo is rare
   but fully supported. All are verified end-to-end against real compressed images (see Verification).
-- crc32c is the checksum; verification is optional (skipped for read-only browsing).
+  **Prealloc** (fallocate) extents read as zeros, not the stale unwritten disk blocks.
+- crc32c checksums: verification is **optional** and off by default (read-only browsing doesn't need
+  it); `setVerifyChecksums(true)` / `-Dorg.jnode.fs.btrfs.verifyChecksums=true` checks every metadata
+  block as it's read (crc32c only; other csum types are skipped, not rejected).
 
 **Not supported (degrades, does not crash)**
-- Writing (read-only), multi-device/RAID, and the extent/csum/free-space trees (not needed to
-  walk the FS tree).
+- Writing (read-only), multi-device/RAID, and the extent/free-space trees (not needed to walk the
+  FS tree). Hardlinks count once per link (no size de-dup) — see the scoping note in sn-spacemap.
 
 ## Why this is the right layer
 
