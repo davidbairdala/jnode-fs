@@ -69,6 +69,9 @@ public class BtrfsVolume {
         }
         this.chunkMap = new BtrfsChunkMap(sb, reader);
         this.tree = new BtrfsTree(reader, chunkMap, sb.getNodeSize());
+        if (Boolean.getBoolean("org.jnode.fs.btrfs.verifyChecksums")) {
+            setVerifyChecksums(true);
+        }
         readRootTree();
         if (!subvolBytenr.containsKey(BtrfsConstants.OBJECTID_FS_TREE)) {
             throw new IOException("btrfs has no FS tree");
@@ -143,6 +146,14 @@ public class BtrfsVolume {
     /** Enables (or disables) descending into snapshot subvolumes. Default: snapshots are skipped. */
     public void setDescendSnapshots(boolean descend) {
         this.descendSnapshots = descend;
+    }
+
+    /**
+     * Enables per-block crc32c verification (off by default — read-only browsing doesn't need it).
+     * Once on, any tree block whose checksum doesn't match raises an {@code IOException} when read.
+     */
+    public void setVerifyChecksums(boolean verify) {
+        tree.setChecksumVerification(verify, sb.getCsumType());
     }
 
     /**

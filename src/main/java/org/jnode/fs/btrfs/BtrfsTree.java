@@ -27,16 +27,33 @@ public class BtrfsTree {
     /** Depth guard against a corrupt/looping tree. */
     private static final int MAX_LEVEL = 16;
 
+    private boolean verifyChecksums;
+    private int csumType = BtrfsChecksum.CSUM_TYPE_CRC32C;
+
     public BtrfsTree(BtrfsBlockReader reader, BtrfsChunkMap chunkMap, int nodeSize) {
         this.reader = reader;
         this.chunkMap = chunkMap;
         this.nodeSize = nodeSize;
     }
 
-    /** Reads one tree block (node or leaf) at a logical address. */
+    /**
+     * Enables per-block checksum verification. Only crc32c is verified; for any other {@code csumType}
+     * verification is silently skipped (we can't check it, but won't reject the volume).
+     */
+    public void setChecksumVerification(boolean verify, int csumType) {
+        this.verifyChecksums = verify;
+        this.csumType = csumType;
+    }
+
+    /** Reads one tree block (node or leaf) at a logical address, verifying its checksum if enabled. */
     public byte[] readBlock(long logical) throws IOException {
         long physical = chunkMap.toPhysical(logical);
-        return reader.read(physical, nodeSize);
+        byte[] block = reader.read(physical, nodeSize);
+        if (verifyChecksums && csumType == BtrfsChecksum.CSUM_TYPE_CRC32C
+                && !BtrfsChecksum.crc32cValid(block, block.length)) {
+            throw new IOException("btrfs crc32c checksum mismatch at logical " + logical);
+        }
+        return block;
     }
 
     /** Visits every item in the tree rooted at {@code rootLogical}. */

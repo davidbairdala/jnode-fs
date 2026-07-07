@@ -45,6 +45,14 @@ public class BtrfsFileSystem extends AbstractFileSystem<BtrfsEntry> {
         volume.setDescendSnapshots(descend);
     }
 
+    /**
+     * Verify each metadata block's crc32c as it's read (off by default). A mismatch raises an
+     * {@code IOException} instead of returning corrupt structure.
+     */
+    public void setVerifyChecksums(boolean verify) {
+        volume.setVerifyChecksums(verify);
+    }
+
     @Override
     protected BtrfsEntry createRootEntry() throws IOException {
         return new BtrfsEntry(volume.getRoot(), "/", this, null);
