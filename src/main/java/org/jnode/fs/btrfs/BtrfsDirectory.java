@@ -12,6 +12,8 @@ import org.jnode.fs.spi.FSEntryTable;
 /**
  * A btrfs directory: its entries come from the {@link BtrfsNode}'s children (which cross into
  * subvolumes where applicable). Read-only.
+ *
+ * @author David Baird
  */
 public class BtrfsDirectory extends AbstractFSDirectory {
 

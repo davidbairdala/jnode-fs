@@ -11,6 +11,8 @@ import com.google.common.hash.Hashing;
  * <p>btrfs computes the crc32c the standard (Castagnoli) way — init {@code ~0}, then a final
  * {@code ~} — which is exactly what Guava's {@link Hashing#crc32c()} produces, so the stored little
  * -endian value equals Guava's {@code asInt()} over the body.
+ *
+ * @author David Baird
  */
 final class BtrfsChecksum {
 

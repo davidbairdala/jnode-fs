@@ -2,7 +2,19 @@ package org.jnode.fs.btrfs;
 
 import org.jnode.util.LittleEndian;
 
-/** A btrfs key: {@code (objectid, type, offset)} — 17 bytes, the ordering key of every B-tree. */
+/**
+ * A btrfs key — 17 bytes, the ordering key of every B-tree:
+ *
+ * <pre>
+ * struct btrfs_disk_key {
+ *     __le64 objectid;
+ *     u8 type;
+ *     __le64 offset;
+ * } __attribute__ ((__packed__));
+ * </pre>
+ *
+ * @author David Baird
+ */
 public class BtrfsDiskKey implements Comparable<BtrfsDiskKey> {
 
     private final long objectId;

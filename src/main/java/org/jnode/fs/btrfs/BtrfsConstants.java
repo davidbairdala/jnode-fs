@@ -4,6 +4,8 @@ package org.jnode.fs.btrfs;
  * On-disk constants for the btrfs format: the offsets, magic, key types and object ids the
  * read-only reader needs. See the Linux kernel {@code fs/btrfs/ctree.h} for the authoritative
  * definitions.
+ *
+ * @author David Baird
  */
 public final class BtrfsConstants {
 
@@ -17,6 +19,7 @@ public final class BtrfsConstants {
     public static final byte[] MAGIC = {'_', 'B', 'H', 'R', 'f', 'S', '_', 'M'};
 
     // ---- superblock field offsets (within the superblock) ----
+    public static final int SB_FSID = 0x20;      // uuid, 16 bytes
     public static final int SB_MAGIC = 0x40;
     public static final int SB_GENERATION = 0x48;
     public static final int SB_ROOT = 0x50;          // logical addr of the root tree
@@ -32,6 +35,9 @@ public final class BtrfsConstants {
     public static final int SB_CSUM_TYPE = 0xc4;
     public static final int SB_ROOT_LEVEL = 0xc6;
     public static final int SB_CHUNK_ROOT_LEVEL = 0xc7;
+    /** Volume label: NUL-terminated UTF-8, follows the embedded dev_item (0xc9 + 0x62). */
+    public static final int SB_LABEL = 0x12b;
+    public static final int SB_LABEL_SIZE = 256;
     public static final int SB_SYS_CHUNK_ARRAY = 0x32b; // 811
     public static final int SYS_CHUNK_ARRAY_MAX = 2048;
 
@@ -70,9 +76,25 @@ public final class BtrfsConstants {
     public static final int FT_REG_FILE = 1;
     public static final int FT_DIR = 2;
 
-    // ---- INODE_ITEM field offsets ----
+    // ---- INODE_ITEM (btrfs_inode_item, 160 bytes) field offsets ----
+    // struct btrfs_inode_item {
+    //     __le64 generation;        0x00      __le64 rdev;              0x38
+    //     __le64 transid;           0x08      __le64 flags;             0x40
+    //     __le64 size;              0x10      __le64 sequence;          0x48
+    //     __le64 nbytes;            0x18      __le64 reserved[4];       0x50
+    //     __le64 block_group;       0x20      struct btrfs_timespec atime; 0x70
+    //     __le32 nlink;             0x28      struct btrfs_timespec ctime; 0x7c
+    //     __le32 uid;               0x2c      struct btrfs_timespec mtime; 0x88
+    //     __le32 gid;               0x30      struct btrfs_timespec otime; 0x94
+    //     __le32 mode;              0x34
+    // };   btrfs_timespec = { __le64 sec; __le32 nsec; }  (12 bytes)
     public static final int INODE_SIZE_OFF = 0x10;
+    public static final int INODE_NLINK_OFF = 0x28;
     public static final int INODE_MODE_OFF = 0x34;
+    public static final int INODE_ATIME = 0x70;
+    public static final int INODE_CTIME = 0x7c;
+    public static final int INODE_MTIME = 0x88;
+    public static final int INODE_OTIME = 0x94;
     /** S_IFMT / S_IFDIR from POSIX mode. */
     public static final int S_IFMT = 0xf000;
     public static final int S_IFDIR = 0x4000;

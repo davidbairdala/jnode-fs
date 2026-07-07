@@ -7,7 +7,7 @@
     <groupId>org.jnode</groupId>
     <artifactId>jnode-fs</artifactId>
     <packaging>jar</packaging>
-    <version>1.0.6-btrfs</version>
+    <version>1.0.7-btrfs</version>
 
     <dependencies>
         <dependency>

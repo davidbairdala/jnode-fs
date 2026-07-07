@@ -16,6 +16,8 @@ import org.jnode.fs.spi.AbstractFileSystem;
 /**
  * A read-only btrfs file system, backed by a {@link BtrfsVolume} over the device's
  * {@link BlockDeviceAPI}.
+ *
+ * @author David Baird
  */
 public class BtrfsFileSystem extends AbstractFileSystem<BtrfsEntry> {
 
@@ -83,8 +85,13 @@ public class BtrfsFileSystem extends AbstractFileSystem<BtrfsEntry> {
         return getFreeSpace();
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @return the superblock label ({@code mkfs.btrfs -L}), or an empty string when unlabelled.
+     */
     @Override
     public String getVolumeName() {
-        return "btrfs";
+        return volume.getSuperblock().getLabel();
     }
 }

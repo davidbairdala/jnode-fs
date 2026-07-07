@@ -10,12 +10,16 @@ import org.jnode.fs.spi.AbstractFSFile;
 /**
  * A read-only btrfs file. Its extents are resolved once (on first read) and cached for the life of
  * this handle, so a paging reader that seeks doesn't re-scan the FS tree each time.
+ *
+ * @author David Baird
  */
 public class BtrfsFile extends AbstractFSFile {
 
     private final BtrfsEntry entry;
     private final BtrfsNode node;
     private List<BtrfsFileContent.Extent> extents;
+    /** One-slot decompressed-extent cache: sequential paging re-reads each extent once, not per page. */
+    private final BtrfsFileContent.ExtentCache cache = new BtrfsFileContent.ExtentCache();
 
     public BtrfsFile(BtrfsEntry entry) {
         super((BtrfsFileSystem) entry.getFileSystem());
@@ -36,7 +40,8 @@ public class BtrfsFile extends AbstractFSFile {
         }
         int len = dest.remaining();
         byte[] buf = new byte[len];
-        int read = BtrfsFileContent.readFromExtents(volume, extents, node.getSize(), fileOffset, buf, 0, len);
+        int read = BtrfsFileContent.readFromExtents(volume, extents, node.getSize(), fileOffset,
+                buf, 0, len, cache);
         if (read > 0) {
             dest.put(buf, 0, read);
         }

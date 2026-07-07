@@ -1,12 +1,18 @@
 package org.jnode.fs.btrfs;
 
 import org.jnode.fs.FSDirectory;
+import org.jnode.fs.FSEntryCreated;
+import org.jnode.fs.FSEntryLastAccessed;
+import org.jnode.fs.FSEntryLastChanged;
 import org.jnode.fs.spi.AbstractFSEntry;
 
 /**
  * A btrfs directory entry, wrapping a {@link BtrfsNode}.
+ *
+ * @author David Baird
  */
-public class BtrfsEntry extends AbstractFSEntry {
+public class BtrfsEntry extends AbstractFSEntry
+        implements FSEntryCreated, FSEntryLastAccessed, FSEntryLastChanged {
 
     private final BtrfsNode node;
 
@@ -26,8 +32,34 @@ public class BtrfsEntry extends AbstractFSEntry {
         return node.isDirectory() ? AbstractFSEntry.DIR_ENTRY : AbstractFSEntry.FILE_ENTRY;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>btrfs object ids restart at 256 within <em>every</em> subvolume, so the id must include the
+     * subvolume to be unique across the volume.</p>
+     */
     @Override
     public String getId() {
-        return Long.toString(node.getObjectId());
+        return node.getSubvolId() + "-" + node.getObjectId();
+    }
+
+    @Override
+    public long getLastModified() {
+        return node.getLastModified();
+    }
+
+    @Override
+    public long getLastChanged() {
+        return node.getLastChanged();
+    }
+
+    @Override
+    public long getLastAccessed() {
+        return node.getLastAccessed();
+    }
+
+    @Override
+    public long getCreated() {
+        return node.getCreated();
     }
 }

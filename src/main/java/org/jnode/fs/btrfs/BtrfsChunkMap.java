@@ -11,6 +11,8 @@ import org.jnode.util.LittleEndian;
  * everything logically; the mapping lives in the chunk tree. The superblock carries a {@code
  * sys_chunk_array} with just enough chunk mappings to read the chunk tree itself, which is then
  * walked to collect the full mapping (single-device only — multi-device stripes are rejected).
+ *
+ * @author David Baird
  */
 public class BtrfsChunkMap {
 
@@ -86,7 +88,13 @@ public class BtrfsChunkMap {
         chunks.add(new Chunk(logical, length, physical));
     }
 
-    /** Physical device offset for a logical address. */
+    /**
+     * Physical device offset for a logical address.
+     *
+     * @param logical a btrfs logical address (as stored in tree pointers and extents).
+     * @return the corresponding physical offset on the (single) device.
+     * @throws IOException if no chunk maps the address.
+     */
     public long toPhysical(long logical) throws IOException {
         for (Chunk c : chunks) {
             if (c.contains(logical)) {

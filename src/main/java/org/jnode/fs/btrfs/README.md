@@ -14,12 +14,18 @@ default to btrfs — jnode-fs previously had no btrfs support).
   with a non-zero `parent_uuid`) are **skipped by default** — a snapper/openSUSE root has dozens,
   each ≈ a full copy sharing storage, which would explode the tree; re-enable with
   `setDescendSnapshots(true)` or `-Dorg.jnode.fs.btrfs.descendSnapshots=true`.
-- FS-tree walk: `INODE_ITEM` (size, mode), `DIR_INDEX` (directory entries) — one scan per subvolume
-  builds its inode/children maps. **Symlinks** are recognised (`BtrfsNode.isSymlink()` /
-  `getSymlinkTarget()`) and never followed.
+- FS-tree walk: `INODE_ITEM` (size, mode, atime/ctime/mtime/otime), `DIR_INDEX` (directory
+  entries) — one scan per subvolume builds its inode/children maps. **Symlinks** are recognised
+  (`BtrfsNode.isSymlink()` / `getSymlinkTarget()`) and never followed. Entries expose the standard
+  jnode timestamp interfaces (`getLastModified`, `FSEntryCreated`/`LastAccessed`/`LastChanged`) and
+  a volume-unique id (`subvolId-objectId` — plain objectids repeat in every subvolume). The volume
+  label (`mkfs.btrfs -L`) is reported via `getVolumeName()`.
 - Keyed B-tree lookup (`BtrfsTree.search`): file-content reads descend to an inode's `EXTENT_DATA`
   items in O(tree depth) node reads and iterate the matching range, rather than rescanning the whole
-  FS tree per open. (The size/tree build still scans once — it wants every item.)
+  FS tree per open. (The size/tree build still scans once — it wants every item.) Uncompressed
+  extents are then read **by range** (only the requested bytes, never a whole — up to 128 MiB —
+  extent), and compressed extents go through a per-handle one-slot cache so sequential paging
+  decompresses each ≤128 KiB extent once.
 - File content: inline extents, regular extents, and zlib-, zstd- and lzo-compressed extents (zstd
   and lzo via the pure-Java aircompressor decoder). zstd is the Fedora/openSUSE default; lzo is rare
   but fully supported. All are verified end-to-end against real compressed images (see Verification).

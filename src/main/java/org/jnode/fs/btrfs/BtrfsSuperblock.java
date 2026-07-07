@@ -9,6 +9,8 @@ import org.jnode.util.LittleEndian;
  * The btrfs superblock (parsed from the primary copy at {@link BtrfsConstants#SUPERBLOCK_OFFSET}).
  * Everything the reader needs to start: the logical addresses of the root and chunk trees, the node
  * size, and the {@code sys_chunk_array} that bootstraps logical→physical translation.
+ *
+ * @author David Baird
  */
 public class BtrfsSuperblock {
 
@@ -64,6 +66,20 @@ public class BtrfsSuperblock {
     /** Checksum algorithm: 0 = crc32c (default), 1 = xxhash64, 2 = sha256, 3 = blake2. */
     public int getCsumType() {
         return LittleEndian.getUInt16(data, BtrfsConstants.SB_CSUM_TYPE);
+    }
+
+    /**
+     * The volume label (`mkfs.btrfs -L` / `btrfs filesystem label`), or an empty string if unset.
+     *
+     * @return the label, decoded UTF-8 up to its NUL terminator.
+     */
+    public String getLabel() {
+        int start = BtrfsConstants.SB_LABEL;
+        int len = 0;
+        while (len < BtrfsConstants.SB_LABEL_SIZE && data[start + len] != 0) {
+            len++;
+        }
+        return new String(data, start, len, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     public long getNumDevices() {

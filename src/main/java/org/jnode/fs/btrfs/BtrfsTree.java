@@ -13,6 +13,8 @@ import org.jnode.util.LittleEndian;
  * {@link #scanLeaves} visits every item in the tree (used once per subvolume to collect inodes and
  * directory entries); a keyed {@link #search} descends to a single item in O(depth) node reads and
  * iterates forward in key order (used to read one inode's extents without rescanning the tree).
+ *
+ * @author David Baird
  */
 public class BtrfsTree {
 
@@ -39,6 +41,9 @@ public class BtrfsTree {
     /**
      * Enables per-block checksum verification. Only crc32c is verified; for any other {@code csumType}
      * verification is silently skipped (we can't check it, but won't reject the volume).
+     *
+     * @param verify   whether to verify each block as it is read.
+     * @param csumType the superblock's checksum algorithm (0 = crc32c).
      */
     public void setChecksumVerification(boolean verify, int csumType) {
         this.verifyChecksums = verify;
@@ -56,7 +61,13 @@ public class BtrfsTree {
         return block;
     }
 
-    /** Visits every item in the tree rooted at {@code rootLogical}. */
+    /**
+     * Visits every item in the tree rooted at {@code rootLogical}.
+     *
+     * @param rootLogical the logical address of the tree's root block.
+     * @param visitor     receives each leaf item's key and data, in key order.
+     * @throws IOException if a tree block cannot be read (or fails checksum verification).
+     */
     public void scanLeaves(long rootLogical, ItemVisitor visitor) throws IOException {
         scan(rootLogical, visitor, 0);
     }
@@ -101,6 +112,11 @@ public class BtrfsTree {
      * the root and picking, at each internal node, the child whose key range covers the target. If no
      * item is &gt;= target the returned cursor is not {@link Cursor#valid() valid}. Iterate forward
      * with {@link Cursor#next()}.
+     *
+     * @param rootLogical the logical address of the tree's root block.
+     * @param target      the search key (lower bound).
+     * @return a cursor at the first item &gt;= {@code target}; not valid if none exists.
+     * @throws IOException if a tree block cannot be read.
      */
     public Cursor search(long rootLogical, BtrfsDiskKey target) throws IOException {
         Cursor cursor = new Cursor();

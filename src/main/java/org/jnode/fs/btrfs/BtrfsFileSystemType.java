@@ -12,6 +12,8 @@ import org.jnode.partitions.PartitionTableEntry;
 /**
  * The file system type for btrfs (read-only). Detected by the {@code _BHRfS_M} magic at offset 0x40
  * within the superblock, which lives at physical offset {@link BtrfsConstants#SUPERBLOCK_OFFSET}.
+ *
+ * @author David Baird
  */
 public class BtrfsFileSystemType implements BlockDeviceFileSystemType<BtrfsFileSystem> {
 

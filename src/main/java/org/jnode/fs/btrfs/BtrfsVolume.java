@@ -15,6 +15,8 @@ import org.jnode.util.LittleEndian;
  * top-level subvolume (FS_TREE, objectid 5) as the root and descends into nested subvolumes, so a
  * disk-usage walk sees every subvolume's files. Each subvolume's FS tree is scanned once (lazily)
  * into small inode/children maps; navigation and file-content reads use those maps.
+ *
+ * @author David Baird
  */
 public class BtrfsVolume {
 
@@ -31,10 +33,37 @@ public class BtrfsVolume {
         }
     }
 
+    /** What the reader keeps of one {@code INODE_ITEM}: size, kind, and the four timestamps (ms). */
+    static final class InodeInfo {
+        final long size;
+        final boolean directory;
+        final boolean symlink;
+        final long accessedMs;  // atime
+        final long changedMs;   // ctime (inode change)
+        final long modifiedMs;  // mtime (content change)
+        final long createdMs;   // otime (birth; 0 on filesystems/tools that never set it)
+
+        InodeInfo(long size, boolean directory, boolean symlink,
+                long accessedMs, long changedMs, long modifiedMs, long createdMs) {
+            this.size = size;
+            this.directory = directory;
+            this.symlink = symlink;
+            this.accessedMs = accessedMs;
+            this.changedMs = changedMs;
+            this.modifiedMs = modifiedMs;
+            this.createdMs = createdMs;
+        }
+
+        /** A stand-in for a missing inode (e.g. a subvolume root dir that failed to resolve). */
+        static InodeInfo missingDirectory() {
+            return new InodeInfo(0, true, false, 0, 0, 0, 0);
+        }
+    }
+
     /** The scanned state of one subvolume's FS tree. */
     private static final class Subvol {
         final long rootDirId;
-        final Map<Long, long[]> inodes = new HashMap<Long, long[]>();   // objectId -> {size, dirFlag}
+        final Map<Long, InodeInfo> inodes = new HashMap<Long, InodeInfo>();
         final Map<Long, List<DirEntry>> children = new HashMap<Long, List<DirEntry>>();
 
         Subvol(long rootDirId) {
@@ -82,10 +111,21 @@ public class BtrfsVolume {
         return sb;
     }
 
-    /** The volume root: the top-level subvolume's root directory. */
+    /**
+     * The volume root: the top-level subvolume's root directory.
+     *
+     * @return a node for the root directory of the FS tree (objectid 5).
+     * @throws IOException if the FS tree cannot be read.
+     */
     public BtrfsNode getRoot() throws IOException {
         Subvol top = subvol(BtrfsConstants.OBJECTID_FS_TREE);
-        return new BtrfsNode(this, BtrfsConstants.OBJECTID_FS_TREE, top.rootDirId, "", true, 0);
+        return new BtrfsNode(this, BtrfsConstants.OBJECTID_FS_TREE, top.rootDirId, "",
+                infoOrDir(top, top.rootDirId));
+    }
+
+    private static InodeInfo infoOrDir(Subvol sv, long objectId) {
+        InodeInfo info = sv.inodes.get(objectId);
+        return info != null ? info : InodeInfo.missingDirectory();
     }
 
     /** Children of a directory node (crossing into subvolumes where a dir entry points at one). */
@@ -107,16 +147,14 @@ public class BtrfsVolume {
                     continue; // a snapshot (parent_uuid set) — skipped unless descent is enabled
                 }
                 Subvol child = subvol(e.childObjectId);
-                result.add(new BtrfsNode(this, e.childObjectId, child.rootDirId, e.name, true, 0));
+                result.add(new BtrfsNode(this, e.childObjectId, child.rootDirId, e.name,
+                        infoOrDir(child, child.rootDirId)));
             } else {
-                long[] info = sv.inodes.get(e.childObjectId);
+                InodeInfo info = sv.inodes.get(e.childObjectId);
                 if (info == null) {
                     continue;
                 }
-                boolean isDir = info[1] != 0;
-                boolean isLink = info.length > 2 && info[2] != 0;
-                result.add(new BtrfsNode(this, dir.getSubvolId(), e.childObjectId, e.name, isDir,
-                        info[0], isLink));
+                result.add(new BtrfsNode(this, dir.getSubvolId(), e.childObjectId, e.name, info));
             }
         }
         return result;
@@ -193,9 +231,12 @@ public class BtrfsVolume {
                 long size = LittleEndian.getInt64(data, BtrfsConstants.INODE_SIZE_OFF);
                 int mode = (int) LittleEndian.getUInt32(data, BtrfsConstants.INODE_MODE_OFF);
                 int fmt = mode & BtrfsConstants.S_IFMT;
-                long dirFlag = fmt == BtrfsConstants.S_IFDIR ? 1 : 0;
-                long linkFlag = fmt == BtrfsConstants.S_IFLNK ? 1 : 0;
-                sv.inodes.put(key.getObjectId(), new long[] {size, dirFlag, linkFlag});
+                sv.inodes.put(key.getObjectId(), new InodeInfo(size,
+                        fmt == BtrfsConstants.S_IFDIR, fmt == BtrfsConstants.S_IFLNK,
+                        timespecMs(data, BtrfsConstants.INODE_ATIME),
+                        timespecMs(data, BtrfsConstants.INODE_CTIME),
+                        timespecMs(data, BtrfsConstants.INODE_MTIME),
+                        timespecMs(data, BtrfsConstants.INODE_OTIME)));
             } else if (type == BtrfsConstants.TYPE_DIR_INDEX) {
                 DirEntry e = parseDirEntry(data);
                 if (e != null) {
@@ -218,6 +259,16 @@ public class BtrfsVolume {
             }
         });
         return dirId[0];
+    }
+
+    /** A btrfs_timespec ({@code __le64 sec; __le32 nsec;}) at {@code off}, as epoch milliseconds. */
+    private static long timespecMs(byte[] data, int off) {
+        if (off + 12 > data.length) {
+            return 0; // truncated (pre-timespec) inode item
+        }
+        long sec = LittleEndian.getInt64(data, off);
+        long nsec = LittleEndian.getUInt32(data, off + 8);
+        return sec * 1_000L + nsec / 1_000_000L;
     }
 
     private static DirEntry parseDirEntry(byte[] data) {

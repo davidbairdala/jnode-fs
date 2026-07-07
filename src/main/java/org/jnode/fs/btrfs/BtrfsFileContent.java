@@ -13,10 +13,26 @@ import org.jnode.util.LittleEndian;
 
 /**
  * Reads btrfs file content from {@code EXTENT_DATA} items: <b>inline</b> extents (small files, data
- * embedded in the FS tree) and <b>regular</b> extents (pointing at a logical disk range). zlib
- * compression is decompressed with the JDK's {@link Inflater} and zstd with aircompressor's
- * pure-Java decoder; lzo is still rejected with a clear message (the file's size is always correct —
- * it comes from the inode). Holes read as zeros.
+ * embedded in the FS tree), <b>regular</b> extents (pointing at a logical disk range) and
+ * <b>prealloc</b> extents (allocated but unwritten — read as zeros). zlib is decompressed with the
+ * JDK's {@link Inflater}; zstd and lzo with aircompressor's pure-Java decoders. Holes read as zeros.
+ *
+ * <pre>
+ * struct btrfs_file_extent_item {
+ *     __le64 generation;                 0x00
+ *     __le64 ram_bytes;                  0x08   (uncompressed extent size)
+ *     u8 compression;                    0x10   (0 none, 1 zlib, 2 lzo, 3 zstd)
+ *     u8 encryption; __le16 other_encoding;
+ *     u8 type;                           0x14   (0 inline, 1 regular, 2 prealloc)
+ *     // inline data starts at 0x15; for regular/prealloc instead:
+ *     __le64 disk_bytenr;                0x15   (0 = hole)
+ *     __le64 disk_num_bytes;             0x1d
+ *     __le64 offset;                     0x25   (into the decompressed extent)
+ *     __le64 num_bytes;                  0x2d
+ * } __attribute__ ((__packed__));
+ * </pre>
+ *
+ * @author David Baird
  */
 final class BtrfsFileContent {
 
@@ -85,15 +101,50 @@ final class BtrfsFileContent {
         return extents;
     }
 
+    /**
+     * A one-slot cache of the last materialised (decompressed) extent, owned by a file handle. A
+     * sequential reader paging through a compressed file re-reads the same &le;128&nbsp;KiB extent
+     * many times; this collapses that to one decompression per extent without holding more than one
+     * extent's bytes. (Uncompressed extents never enter the cache — they are read by range.)
+     */
+    static final class ExtentCache {
+        private Extent extent;
+        private byte[] data;
+    }
+
     static int read(BtrfsVolume vol, long subvolId, long objectId, long fileSize, long fileOffset,
             byte[] dst, int off, int len) throws IOException {
         List<Extent> extents = collectExtents(vol, subvolId, objectId);
-        return readFromExtents(vol, extents, fileSize, fileOffset, dst, off, len);
+        return readFromExtents(vol, extents, fileSize, fileOffset, dst, off, len, null);
     }
 
-    /** Fills {@code dst[off..off+len)} from {@code fileOffset}, using the extents (holes -> zeros). */
+    /** As {@link #readFromExtents(BtrfsVolume, List, long, long, byte[], int, int, ExtentCache)},
+     *  uncached. */
     static int readFromExtents(BtrfsVolume vol, List<Extent> extents, long fileSize, long fileOffset,
             byte[] dst, int off, int len) throws IOException {
+        return readFromExtents(vol, extents, fileSize, fileOffset, dst, off, len, null);
+    }
+
+    /**
+     * Fills {@code dst[off..off+len)} from {@code fileOffset}, using the extents (holes read as
+     * zeros). Uncompressed regular extents are read <em>by range</em> — only the requested bytes are
+     * fetched from the device, never the whole extent (which can be 128&nbsp;MiB). Compressed and
+     * inline extents are materialised whole (they are &le;128&nbsp;KiB decompressed) through the
+     * optional {@code cache}.
+     *
+     * @param vol        the volume (device + chunk map).
+     * @param extents    the file's extents, from {@link #collectExtents}.
+     * @param fileSize   the file's size from its inode (reads are clamped to it).
+     * @param fileOffset the file byte offset to read from.
+     * @param dst        the destination buffer.
+     * @param off        the destination offset.
+     * @param len        the maximum bytes to read.
+     * @param cache      a per-handle one-slot extent cache, or {@code null} for none.
+     * @return the bytes read, or {@code -1} at/after end of file.
+     * @throws IOException if the device or a decompressor fails.
+     */
+    static int readFromExtents(BtrfsVolume vol, List<Extent> extents, long fileSize, long fileOffset,
+            byte[] dst, int off, int len, ExtentCache cache) throws IOException {
         if (fileOffset >= fileSize) {
             return -1;
         }
@@ -107,7 +158,19 @@ final class BtrfsFileContent {
             if (lo >= hi) {
                 continue;
             }
-            byte[] extentData = materialise(vol, e); // decompressed/plain bytes of the extent
+            if (e.type == BtrfsConstants.EXTENT_TYPE_REGULAR
+                    && e.compression == BtrfsConstants.COMPRESS_NONE && e.diskBytenr != 0) {
+                // plain on-disk bytes: read just the slice we need, straight off the device
+                long inExtent = e.dataOffset + (lo - eStart); // byte offset within the on-disk extent
+                long available = e.diskNumBytes - inExtent;   // guard a corrupt data_offset
+                int n = (int) Math.min(hi - lo, Math.max(0, available));
+                if (n > 0) {
+                    long physical = vol.chunkMap().toPhysical(e.diskBytenr) + inExtent;
+                    vol.reader().read(physical, dst, off + (int) (lo - fileOffset), n);
+                }
+                continue;
+            }
+            byte[] extentData = materialise(vol, e, cache); // decompressed/inline bytes of the extent
             long inExtentBase = e.dataOffset + (lo - eStart); // where in extentData our slice begins
             for (long p = lo; p < hi; p++) {
                 long src = inExtentBase + (p - lo);
@@ -115,6 +178,19 @@ final class BtrfsFileContent {
             }
         }
         return want;
+    }
+
+    /** The bytes of one extent (inline data or the on-disk range), decompressed if compressed. */
+    private static byte[] materialise(BtrfsVolume vol, Extent e, ExtentCache cache) throws IOException {
+        if (cache != null && cache.extent == e) {
+            return cache.data;
+        }
+        byte[] data = materialise(vol, e);
+        if (cache != null) {
+            cache.extent = e;
+            cache.data = data;
+        }
+        return data;
     }
 
     /** The bytes of one extent (inline data or the on-disk range), decompressed if compressed. */
