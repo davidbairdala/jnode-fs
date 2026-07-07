@@ -61,6 +61,11 @@ public class BtrfsSuperblock {
         return (int) LittleEndian.getUInt32(data, BtrfsConstants.SB_SECTORSIZE);
     }
 
+    /** Checksum algorithm: 0 = crc32c (default), 1 = xxhash64, 2 = sha256, 3 = blake2. */
+    public int getCsumType() {
+        return LittleEndian.getUInt16(data, BtrfsConstants.SB_CSUM_TYPE);
+    }
+
     public long getNumDevices() {
         return LittleEndian.getInt64(data, BtrfsConstants.SB_NUM_DEVICES);
     }
