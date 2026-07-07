@@ -47,10 +47,12 @@ different, higher-level format — not the on-disk B-trees — so it does not he
 Fixtures are produced unprivileged with `mkfs.btrfs -r <dir>` and cross-checked against
 `btrfs inspect-internal dump-tree` / `dump-super`.
 
-`mkfs.btrfs -r` does not compress, and producing real zstd extents needs a privileged
-`mount -o compress=zstd` + writes — so the fork cannot bake a compressed fixture unprivileged.
-The zstd path is instead unit-tested at the decode layer (`BtrfsZstdDecodeTest`): data compressed
-with aircompressor is reproduced in btrfs's exact on-disk shape — one frame, zero-padded to the
-sector size — and asserted to round-trip, including the sector-padding case that the frame-length
-walk exists to handle. End-to-end confirmation is one `View` of a compressed file on a real
-Fedora/openSUSE volume (or a privileged `mount -o compress=zstd` fixture) away.
+zstd is verified two ways. At the decode layer (`BtrfsZstdDecodeTest`), data compressed with
+aircompressor is reproduced in btrfs's exact on-disk shape — one frame, zero-padded to the sector
+size — and asserted to round-trip, including the sector-padding case the frame-length walk handles
+and the "frame declares more than `ram_bytes`" case. End-to-end (`BtrfsZstdFileSystemTest`), a real
+image whose files were written through `mount -o compress-force=zstd` — inline, a full 128 KiB
+regular extent, and a mid-size one, all confirmed `compression 3` by `dump-tree` — is read back and
+the decompressed bytes checked against what was written. (That fixture needs a privileged loopback
+mount to build, the one step `mkfs.btrfs -r` can't do; the multi-node keyed-lookup fixture and the
+simple one are still produced unprivileged.)

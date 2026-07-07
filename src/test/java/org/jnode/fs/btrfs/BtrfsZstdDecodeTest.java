@@ -72,6 +72,21 @@ public class BtrfsZstdDecodeTest {
     }
 
     @Test
+    public void aFrameThatDecodesToMoreThanRamBytesIsTruncated() throws Exception {
+        // btrfs inline extents compress a whole page, but ram_bytes is the real (smaller) file size:
+        // the frame's declared content size (here 4096) exceeds ram_bytes, so the decoder must size to
+        // the frame and return only the leading ram_bytes -- decoding straight into ram_bytes overflows.
+        byte[] real = "hello zstd world, compressed inline\n".getBytes("UTF-8");
+        byte[] page = new byte[4096];
+        System.arraycopy(real, 0, page, 0, real.length); // remainder stays zero (page padding)
+
+        byte[] out = BtrfsFileContent.decompress(
+                BtrfsConstants.COMPRESS_ZSTD, compressAsBtrfsOnDisk(page), real.length);
+
+        assertArrayEquals(real, out);
+    }
+
+    @Test
     public void zeroLengthExtentDecodesToEmpty() throws Exception {
         byte[] out = BtrfsFileContent.decompress(BtrfsConstants.COMPRESS_ZSTD, new byte[SECTOR], 0);
         assertEquals(0, out.length);
