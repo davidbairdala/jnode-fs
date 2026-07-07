@@ -16,15 +16,12 @@ default to btrfs — jnode-fs previously had no btrfs support).
 - Keyed B-tree lookup (`BtrfsTree.search`): file-content reads descend to an inode's `EXTENT_DATA`
   items in O(tree depth) node reads and iterate the matching range, rather than rescanning the whole
   FS tree per open. (The size/tree build still scans once — it wants every item.)
-- File content: inline extents, regular extents, and zlib- and zstd-compressed extents (zstd via
-  the pure-Java aircompressor decoder — the Fedora/openSUSE default, so this is the common case).
+- File content: inline extents, regular extents, and zlib-, zstd- and lzo-compressed extents (zstd
+  and lzo via the pure-Java aircompressor decoder). zstd is the Fedora/openSUSE default; lzo is rare
+  but fully supported. All are verified end-to-end against real compressed images (see Verification).
 - crc32c is the checksum; verification is optional (skipped for read-only browsing).
 
 **Not supported (degrades, does not crash)**
-- lzo-compressed file *contents* — the file still appears with its correct size (size comes from
-  the inode); reading such a file's bytes throws a clear "compression not supported". lzo is rare
-  on modern volumes (nothing defaults to it); the decoder is available (aircompressor) so this is
-  a small follow-up if a real lzo volume turns up.
 - Writing (read-only), multi-device/RAID, and the extent/csum/free-space trees (not needed to
   walk the FS tree).
 
@@ -56,3 +53,9 @@ regular extent, and a mid-size one, all confirmed `compression 3` by `dump-tree`
 the decompressed bytes checked against what was written. (That fixture needs a privileged loopback
 mount to build, the one step `mkfs.btrfs -r` can't do; the multi-node keyed-lookup fixture and the
 simple one are still produced unprivileged.)
+
+lzo uses btrfs's own segment framing (a total-length header, then per-segment length-prefixed
+`lzo1x` blocks, each ≤ one sector, with the segment header kept off sector boundaries). It is
+unit-tested with a symmetric encoder (`BtrfsLzoDecodeTest`) and — like zstd — end-to-end
+(`BtrfsLzoFileSystemTest`) against a real `mount -o compress-force=lzo` image: an inline
+single-segment extent and a full 128 KiB ~32-segment extent read back to the exact bytes written.
