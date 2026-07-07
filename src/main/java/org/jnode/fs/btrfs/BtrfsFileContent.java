@@ -146,22 +146,35 @@ final class BtrfsFileContent {
         }
     }
 
+    /** The largest a single btrfs extent decodes to (BTRFS_MAX_UNCOMPRESSED) — bounds the buffer. */
+    private static final int MAX_EXTENT_BYTES = 128 * 1024;
+
     /**
-     * Decompress a zstd extent to its uncompressed length ({@code ramBytes}). btrfs stores the
-     * compressed frame padded with zeros up to the sector size ({@code disk_num_bytes} is rounded
-     * up); aircompressor's decoder loops {@code while (input < limit)} looking for more frames, so it
-     * would reject that padding as a bad second frame. We first measure the frame's exact length
-     * (walking its block headers — no decoding) and hand the decoder only those bytes.
+     * Decompress a zstd extent and return its leading {@code ramBytes} (the extent's logical size).
+     * Two btrfs framing quirks are handled:
+     * <ul>
+     *   <li>The on-disk frame is padded with zeros up to the sector size ({@code disk_num_bytes} is
+     *       rounded up); aircompressor's decoder loops {@code while (input < limit)} looking for more
+     *       frames, so it would reject that padding as a bad second frame. We measure the frame's
+     *       exact length (walking its block headers, no decoding) and hand over only those bytes.</li>
+     *   <li>The frame may decode to <em>more</em> than {@code ramBytes}: btrfs compresses a whole
+     *       page/extent even when fewer bytes are the file's data (an inline extent's frame declares a
+     *       full page but {@code ram_bytes} is the real size). We size the output to the frame's own
+     *       declared content size, then keep the first {@code ramBytes}.</li>
+     * </ul>
      */
     private static byte[] inflateZstd(byte[] input, int ramBytes) throws IOException {
         if (ramBytes <= 0) {
             return new byte[0];
         }
         int frameLen = zstdFrameLength(input, input.length);
-        byte[] out = new byte[ramBytes];
+        long declared = ZstdDecompressor.getDecompressedSize(input, 0, frameLen); // frame content size
+        int cap = Math.max(ramBytes, MAX_EXTENT_BYTES);
+        int outLen = (int) Math.min(Math.max((long) ramBytes, declared), (long) cap);
+        byte[] out = new byte[outLen];
         try {
-            int n = new ZstdDecompressor().decompress(input, 0, frameLen, out, 0, ramBytes);
-            return n == ramBytes ? out : Arrays.copyOf(out, n);
+            new ZstdDecompressor().decompress(input, 0, frameLen, out, 0, outLen);
+            return outLen == ramBytes ? out : Arrays.copyOf(out, ramBytes);
         } catch (RuntimeException ex) {
             // aircompressor signals bad data with MalformedInputException (a RuntimeException)
             throw new IOException("btrfs zstd inflate failed: " + ex.getMessage(), ex);
