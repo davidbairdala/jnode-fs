@@ -33,7 +33,7 @@ public class BtrfsPreallocTest {
         Arrays.fill(dst, (byte) 0xAA); // pre-dirty so a missed zero-fill would show
 
         // null volume: if the prealloc path tried to read the disk (chunkMap/reader) this would NPE
-        int n = BtrfsFileContent.readFromExtents(null, extents, 100, 0, dst, 0, 100);
+        int n = BtrfsFileContent.readFromExtents(null, extents, 100, 0, dst, 0, 100, null);
 
         assertEquals(100, n);
         assertArrayEquals(new byte[100], dst);
@@ -49,7 +49,7 @@ public class BtrfsPreallocTest {
         byte[] dst = new byte[100];
         Arrays.fill(dst, (byte) 0x7F);
 
-        int n = BtrfsFileContent.readFromExtents(null, extents, 100, 0, dst, 0, 100);
+        int n = BtrfsFileContent.readFromExtents(null, extents, 100, 0, dst, 0, 100, null);
 
         assertEquals(100, n);
         assertArrayEquals(new byte[100], dst);

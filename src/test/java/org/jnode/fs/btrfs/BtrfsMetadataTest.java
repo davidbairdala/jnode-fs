@@ -86,14 +86,14 @@ public class BtrfsMetadataTest {
         try (FileDevice device = new FileDevice(testFile, "r")) {
             BtrfsFileSystem fs = new BtrfsFileSystemType().create(device, true);
             BtrfsVolume.InodeInfo info = BtrfsVolume.InodeInfo.missingDirectory();
-            BtrfsNode inTop = new BtrfsNode(fs.getVolume(), 5, 256, "a", info);
-            BtrfsNode inSubvol = new BtrfsNode(fs.getVolume(), 257, 256, "b", info);
+            BtrfsNode inTop = new BtrfsNode(fs.getVolume(), 5, 256, 2, "a", info);
+            BtrfsNode inSubvol = new BtrfsNode(fs.getVolume(), 257, 256, 2, "b", info);
 
             BtrfsEntry topEntry = new BtrfsEntry(inTop, "a", fs, null);
             BtrfsEntry subEntry = new BtrfsEntry(inSubvol, "b", fs, null);
 
-            assertEquals("5-256", topEntry.getId());
-            assertEquals("257-256", subEntry.getId());
+            assertEquals("5-256-2", topEntry.getId());
+            assertEquals("257-256-2", subEntry.getId());
             assertNotEquals("same objectId, different subvolume -> different id",
                     topEntry.getId(), subEntry.getId());
         } finally {

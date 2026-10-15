@@ -53,19 +53,38 @@ public class BtrfsChunkMap {
         while (pos + BtrfsConstants.KEY_SIZE < array.length) {
             long logical = LittleEndian.getInt64(array, pos + 9); // key.offset = chunk logical start
             int chunkOff = pos + BtrfsConstants.KEY_SIZE;
-            int numStripes = LittleEndian.getUInt16(array, chunkOff + BtrfsConstants.CHUNK_NUM_STRIPES);
-            if (numStripes <= 0) {
-                break;
-            }
+            pos = chunkOff + chunkSize(array, chunkOff, "sys_chunk_array");
             addChunkAt(logical, array, chunkOff);
-            pos = chunkOff + BtrfsConstants.CHUNK_STRIPES + numStripes * BtrfsConstants.STRIPE_SIZE;
         }
     }
 
     private void addChunk(long logical, byte[] chunkItem) throws IOException {
+        chunkSize(chunkItem, 0, "CHUNK_ITEM");
         addChunkAt(logical, chunkItem, 0);
     }
 
+    /**
+     * The byte size of the btrfs_chunk at {@code chunkOff} — its fixed fields plus {@code num_stripes}
+     * stripes — after checking that all of it lies within {@code buf}. A chunk that claims more
+     * stripes than the bytes that follow it (a truncated array or a short item) is corrupt.
+     */
+    private static int chunkSize(byte[] buf, int chunkOff, String what) throws IOException {
+        if (chunkOff + BtrfsConstants.CHUNK_STRIPES > buf.length) {
+            throw new IOException("btrfs " + what + ": chunk header truncated");
+        }
+        int numStripes = LittleEndian.getUInt16(buf, chunkOff + BtrfsConstants.CHUNK_NUM_STRIPES);
+        if (numStripes <= 0) {
+            throw new IOException("btrfs " + what + ": chunk with no stripes");
+        }
+        int size = BtrfsConstants.CHUNK_STRIPES + numStripes * BtrfsConstants.STRIPE_SIZE;
+        if (chunkOff + size > buf.length) {
+            throw new IOException("btrfs " + what + ": chunk claims " + numStripes
+                    + " stripes but is truncated");
+        }
+        return size;
+    }
+
+    /** Adds the (already bounds-checked) btrfs_chunk at {@code chunkOff}. */
     private void addChunkAt(long logical, byte[] buf, int chunkOff) throws IOException {
         long length = LittleEndian.getInt64(buf, chunkOff + BtrfsConstants.CHUNK_LENGTH);
         long type = LittleEndian.getInt64(buf, chunkOff + BtrfsConstants.CHUNK_TYPE);

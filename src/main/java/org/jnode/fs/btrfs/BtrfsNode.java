@@ -6,22 +6,34 @@ import java.util.List;
 /**
  * A handle to one inode in a {@link BtrfsVolume}: which subvolume it lives in, its object id, name,
  * kind, size and timestamps. Lightweight (navigation looks children up in the subvolume's scanned
- * maps), so a large tree isn't materialised eagerly.
+ * maps), so a large tree isn't materialised eagerly. Content reads resolve the inode's extents once
+ * and keep a one-slot decompressed-extent cache, so repeated or sequential reads through the same
+ * handle neither re-descend the FS tree nor re-inflate the same extent.
  *
  * @author David Baird
  */
 public class BtrfsNode {
 
+    /** The {@link #getDirIndex() directory index} of a node that has no directory entry (the root). */
+    static final long NO_DIR_INDEX = -1L;
+
     private final BtrfsVolume volume;
     private final long subvolId;
     private final long objectId;
+    private final long dirIndex;
     private final String name;
     private final BtrfsVolume.InodeInfo info;
+    /** The inode's extents, resolved on first read. */
+    private List<BtrfsFileContent.Extent> extents;
+    /** One-slot decompressed-extent cache: sequential paging re-reads each extent once, not per page. */
+    private final BtrfsFileContent.ExtentCache cache = new BtrfsFileContent.ExtentCache();
 
-    BtrfsNode(BtrfsVolume volume, long subvolId, long objectId, String name, BtrfsVolume.InodeInfo info) {
+    BtrfsNode(BtrfsVolume volume, long subvolId, long objectId, long dirIndex, String name,
+            BtrfsVolume.InodeInfo info) {
         this.volume = volume;
         this.subvolId = subvolId;
         this.objectId = objectId;
+        this.dirIndex = dirIndex;
         this.name = name;
         this.info = info;
     }
@@ -94,6 +106,15 @@ public class BtrfsNode {
     }
 
     /**
+     * The {@code DIR_INDEX} key offset of this node's directory entry: unique among the entries of
+     * one directory, so it tells apart hard links to the same inode (which share an object id).
+     * {@link #NO_DIR_INDEX} for the volume root, which has no entry.
+     */
+    long getDirIndex() {
+        return dirIndex;
+    }
+
+    /**
      * The target path of a symlink (stored as the inode's inline content); empty if not a symlink.
      *
      * @return the symlink target path.
@@ -147,6 +168,9 @@ public class BtrfsNode {
      * @throws IOException if the extents cannot be read.
      */
     public int read(long fileOffset, byte[] dst, int off, int len) throws IOException {
-        return BtrfsFileContent.read(volume, subvolId, objectId, info.size, fileOffset, dst, off, len);
+        if (extents == null) {
+            extents = BtrfsFileContent.collectExtents(volume, subvolId, objectId);
+        }
+        return BtrfsFileContent.readFromExtents(volume, extents, info.size, fileOffset, dst, off, len, cache);
     }
 }

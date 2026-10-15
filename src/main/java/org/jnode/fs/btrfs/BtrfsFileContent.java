@@ -68,7 +68,10 @@ final class BtrfsFileContent {
     /**
      * This inode's extents, via a keyed B-tree search: descend to the first {@code EXTENT_DATA} item
      * for the inode and walk forward while the key still matches (they are contiguous in key order),
-     * instead of scanning the whole FS tree. Cache the result for repeated reads.
+     * instead of scanning the whole FS tree. Callers cache the result for repeated reads.
+     *
+     * @throws IOException if the tree cannot be read, or an {@code EXTENT_DATA} item is too short to
+     *                     hold its fixed fields (corrupt metadata).
      */
     static List<Extent> collectExtents(BtrfsVolume vol, long subvolId, long objectId) throws IOException {
         final List<Extent> extents = new ArrayList<Extent>();
@@ -82,8 +85,18 @@ final class BtrfsFileContent {
             }
             byte[] data = cur.data();
             long fileOffset = key.getOffset();
+            // the fixed fields must be present: an inline item is at least the 0x15-byte header, a
+            // regular/prealloc one the full 0x35 bytes (Cursor.data() is empty for a corrupt pointer)
+            if (data.length < BtrfsConstants.EXTENT_INLINE_DATA) {
+                throw new IOException("btrfs EXTENT_DATA item for inode " + objectId + " at " + fileOffset
+                        + " is truncated (" + data.length + " bytes)");
+            }
             int compression = data[BtrfsConstants.EXTENT_COMPRESSION] & 0xFF;
             int type = data[BtrfsConstants.EXTENT_TYPE] & 0xFF;
+            if (type != BtrfsConstants.EXTENT_TYPE_INLINE && data.length < BtrfsConstants.EXTENT_ITEM_SIZE) {
+                throw new IOException("btrfs EXTENT_DATA item for inode " + objectId + " at " + fileOffset
+                        + " is truncated (" + data.length + " bytes)");
+            }
             long ram = LittleEndian.getInt64(data, BtrfsConstants.EXTENT_RAM_BYTES);
             if (type == BtrfsConstants.EXTENT_TYPE_INLINE) {
                 byte[] inline = Arrays.copyOfRange(data, BtrfsConstants.EXTENT_INLINE_DATA, data.length);
@@ -110,19 +123,6 @@ final class BtrfsFileContent {
     static final class ExtentCache {
         private Extent extent;
         private byte[] data;
-    }
-
-    static int read(BtrfsVolume vol, long subvolId, long objectId, long fileSize, long fileOffset,
-            byte[] dst, int off, int len) throws IOException {
-        List<Extent> extents = collectExtents(vol, subvolId, objectId);
-        return readFromExtents(vol, extents, fileSize, fileOffset, dst, off, len, null);
-    }
-
-    /** As {@link #readFromExtents(BtrfsVolume, List, long, long, byte[], int, int, ExtentCache)},
-     *  uncached. */
-    static int readFromExtents(BtrfsVolume vol, List<Extent> extents, long fileSize, long fileOffset,
-            byte[] dst, int off, int len) throws IOException {
-        return readFromExtents(vol, extents, fileSize, fileOffset, dst, off, len, null);
     }
 
     /**
@@ -172,9 +172,10 @@ final class BtrfsFileContent {
             }
             byte[] extentData = materialise(vol, e, cache); // decompressed/inline bytes of the extent
             long inExtentBase = e.dataOffset + (lo - eStart); // where in extentData our slice begins
-            for (long p = lo; p < hi; p++) {
-                long src = inExtentBase + (p - lo);
-                dst[off + (int) (p - fileOffset)] = (src < extentData.length) ? extentData[(int) src] : 0;
+            // copy the part the extent really holds; anything beyond its (short) data stays zero
+            int n = (int) Math.min(hi - lo, Math.max(0, extentData.length - inExtentBase));
+            if (n > 0) {
+                System.arraycopy(extentData, (int) inExtentBase, dst, off + (int) (lo - fileOffset), n);
             }
         }
         return want;

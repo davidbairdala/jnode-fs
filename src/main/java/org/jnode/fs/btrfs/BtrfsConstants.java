@@ -49,6 +49,9 @@ public final class BtrfsConstants {
     public static final int HDR_NRITEMS = 0x60;
     public static final int HDR_LEVEL = 0x64;
 
+    /** {@code BTRFS_MAX_LEVEL}: tree levels run 0 (leaf) to 7; a header claiming more is corrupt. */
+    public static final int MAX_LEVEL = 8;
+
     /** Leaf item: key(17) + offset(4) + size(4). */
     public static final int ITEM_SIZE = 25;
     /** Internal node key pointer: key(17) + blockptr(8) + generation(8). */
@@ -112,7 +115,10 @@ public final class BtrfsConstants {
     // ---- ROOT_ITEM (btrfs_root_item) field offsets ----
     public static final int ROOT_ITEM_DIRID = 0xa8;
     public static final int ROOT_ITEM_BYTENR = 0xb0;
+    public static final int ROOT_ITEM_FLAGS = 0xd0;
     public static final int ROOT_ITEM_LEVEL = 0xee;
+    /** {@code BTRFS_ROOT_SUBVOL_RDONLY}: the subvolume is a read-only snapshot. */
+    public static final long ROOT_SUBVOL_RDONLY = 1L;
     /** parent_uuid: non-zero iff the subvolume was created as a snapshot of another (16 bytes). */
     public static final int ROOT_ITEM_PARENT_UUID = 0x107;
     public static final int UUID_SIZE = 16;
@@ -134,6 +140,8 @@ public final class BtrfsConstants {
     public static final int EXTENT_DISK_NUM_BYTES = 0x1d;
     public static final int EXTENT_DATA_OFFSET = 0x25;
     public static final int EXTENT_NUM_BYTES = 0x2d;
+    /** Size of a regular/prealloc btrfs_file_extent_item (every field present). */
+    public static final int EXTENT_ITEM_SIZE = 0x35;
     public static final int EXTENT_TYPE_INLINE = 0;
     public static final int EXTENT_TYPE_REGULAR = 1;
     public static final int EXTENT_TYPE_PREALLOC = 2;

@@ -37,12 +37,17 @@ public class BtrfsEntry extends AbstractFSEntry
     /**
      * {@inheritDoc}
      *
-     * <p>btrfs object ids restart at 256 within <em>every</em> subvolume, so the id must include the
-     * subvolume to be unique across the volume.</p>
+     * <p>{@code subvolId-objectId-dirIndex}. btrfs object ids restart at 256 within <em>every</em>
+     * subvolume, so the id must include the subvolume to be unique across the volume; and hard links
+     * share an object id, so — as {@code Ext2Entry} and {@code XfsEntry} do with their directory
+     * record id — the entry's {@code DIR_INDEX} offset is appended to keep two links to one inode in
+     * the same directory apart. The root, which has no directory entry, is just
+     * {@code subvolId-objectId}.</p>
      */
     @Override
     public String getId() {
-        return node.getSubvolId() + "-" + node.getObjectId();
+        String id = node.getSubvolId() + "-" + node.getObjectId();
+        return node.getDirIndex() == BtrfsNode.NO_DIR_INDEX ? id : id + "-" + node.getDirIndex();
     }
 
     @Override

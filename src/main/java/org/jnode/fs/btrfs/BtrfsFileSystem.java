@@ -40,8 +40,9 @@ public class BtrfsFileSystem extends AbstractFileSystem<BtrfsEntry> {
     }
 
     /**
-     * Descend into snapshot subvolumes (default: skipped, so a snapper/openSUSE root isn't inflated
-     * by dozens of near-identical snapshots). Call before walking the tree.
+     * Descend into read-only snapshot subvolumes (default: skipped, so a snapper/openSUSE root isn't
+     * inflated by dozens of near-identical snapshots; a writable snapshot — a rolled-back root — is
+     * always descended). Call before walking the tree.
      */
     public void setDescendSnapshots(boolean descend) {
         volume.setDescendSnapshots(descend);

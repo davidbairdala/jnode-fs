@@ -3,6 +3,8 @@ package org.jnode.fs.btrfs;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.jnode.util.LittleEndian;
 
@@ -13,6 +15,12 @@ import org.jnode.util.LittleEndian;
  * {@link #scanLeaves} visits every item in the tree (used once per subvolume to collect inodes and
  * directory entries); a keyed {@link #search} descends to a single item in O(depth) node reads and
  * iterates forward in key order (used to read one inode's extents without rescanning the tree).
+ *
+ * <p>The reader treats the image as untrusted. Every block's header must carry the address it was
+ * read from and a level below {@code BTRFS_MAX_LEVEL}; a child's level must be exactly one less than
+ * its parent's; and a full scan refuses to visit the same block twice. Together these turn a corrupt
+ * or crafted tree (a self-pointing node, a DAG whose shared children would multiply the walk, a
+ * pointer into the wrong block) into an {@link IOException} after a bounded number of reads.</p>
  *
  * @author David Baird
  */
@@ -26,8 +34,6 @@ public class BtrfsTree {
     private final BtrfsBlockReader reader;
     private final BtrfsChunkMap chunkMap;
     private final int nodeSize;
-    /** Depth guard against a corrupt/looping tree. */
-    private static final int MAX_LEVEL = 16;
 
     private boolean verifyChecksums;
     private int csumType = BtrfsChecksum.CSUM_TYPE_CRC32C;
@@ -50,13 +56,42 @@ public class BtrfsTree {
         this.csumType = csumType;
     }
 
-    /** Reads one tree block (node or leaf) at a logical address, verifying its checksum if enabled. */
+    /**
+     * Reads one tree block (node or leaf) at a logical address, verifying its checksum if enabled.
+     * The header's {@code bytenr} must equal {@code logical} (btrfs always writes a block's own
+     * address into it — a mismatch means the pointer or the chunk map is wrong) and its level must
+     * be below {@link BtrfsConstants#MAX_LEVEL}.
+     */
     public byte[] readBlock(long logical) throws IOException {
         long physical = chunkMap.toPhysical(logical);
         byte[] block = reader.read(physical, nodeSize);
+        if (block.length < BtrfsConstants.HEADER_SIZE) {
+            throw new IOException("btrfs node size " + nodeSize + " is smaller than a tree block header");
+        }
         if (verifyChecksums && csumType == BtrfsChecksum.CSUM_TYPE_CRC32C
                 && !BtrfsChecksum.crc32cValid(block, block.length)) {
             throw new IOException("btrfs crc32c checksum mismatch at logical " + logical);
+        }
+        long bytenr = LittleEndian.getInt64(block, BtrfsConstants.HDR_BYTENR);
+        if (bytenr != logical) {
+            throw new IOException("btrfs tree block at logical " + logical + " claims to be at " + bytenr
+                    + " (misdirected pointer or corrupt chunk map)");
+        }
+        int level = block[BtrfsConstants.HDR_LEVEL] & 0xFF;
+        if (level >= BtrfsConstants.MAX_LEVEL) {
+            throw new IOException("btrfs tree block at logical " + logical + " has level " + level
+                    + " (max " + (BtrfsConstants.MAX_LEVEL - 1) + ")");
+        }
+        return block;
+    }
+
+    /** A block the walk expects at {@code expectedLevel} (or any level, when negative, for a root). */
+    private byte[] readBlock(long logical, int expectedLevel) throws IOException {
+        byte[] block = readBlock(logical);
+        int level = block[BtrfsConstants.HDR_LEVEL] & 0xFF;
+        if (expectedLevel >= 0 && level != expectedLevel) {
+            throw new IOException("btrfs tree block at logical " + logical + " has level " + level
+                    + ", expected " + expectedLevel);
         }
         return block;
     }
@@ -66,17 +101,21 @@ public class BtrfsTree {
      *
      * @param rootLogical the logical address of the tree's root block.
      * @param visitor     receives each leaf item's key and data, in key order.
-     * @throws IOException if a tree block cannot be read (or fails checksum verification).
+     * @throws IOException if a tree block cannot be read (or fails checksum verification), or the
+     *                     tree is malformed (a block reached twice, or a level out of sequence).
      */
     public void scanLeaves(long rootLogical, ItemVisitor visitor) throws IOException {
-        scan(rootLogical, visitor, 0);
+        scan(rootLogical, -1, visitor, new HashSet<Long>());
     }
 
-    private void scan(long logical, ItemVisitor visitor, int depth) throws IOException {
-        if (depth > MAX_LEVEL) {
-            throw new IOException("btrfs tree too deep (corrupt?)");
+    private void scan(long logical, int expectedLevel, ItemVisitor visitor, Set<Long> visited)
+            throws IOException {
+        if (!visited.add(logical)) {
+            // within one tree every block has exactly one parent pointer, so a revisit means a
+            // cycle or a DAG — either way a walk that would never end
+            throw new IOException("btrfs tree block at logical " + logical + " reached twice (corrupt tree)");
         }
-        byte[] block = readBlock(logical);
+        byte[] block = readBlock(logical, expectedLevel);
         int nrItems = (int) LittleEndian.getUInt32(block, BtrfsConstants.HDR_NRITEMS);
         int level = block[BtrfsConstants.HDR_LEVEL] & 0xFF;
 
@@ -86,14 +125,11 @@ public class BtrfsTree {
                 if (itemPos + BtrfsConstants.ITEM_SIZE > block.length) {
                     break;
                 }
-                BtrfsDiskKey key = new BtrfsDiskKey(block, itemPos);
-                int dataOff = (int) LittleEndian.getUInt32(block, itemPos + BtrfsConstants.KEY_SIZE);
-                int dataLen = (int) LittleEndian.getUInt32(block, itemPos + BtrfsConstants.KEY_SIZE + 4);
-                int start = BtrfsConstants.HEADER_SIZE + dataOff;
-                if (start < 0 || dataLen < 0 || start + dataLen > block.length) {
-                    continue; // guard against a corrupt item pointer
+                byte[] data = itemData(block, itemPos);
+                if (data == null) {
+                    continue; // corrupt item pointer
                 }
-                visitor.item(key, Arrays.copyOfRange(block, start, start + dataLen));
+                visitor.item(new BtrfsDiskKey(block, itemPos), data);
             }
         } else {
             for (int i = 0; i < nrItems; i++) {
@@ -102,9 +138,25 @@ public class BtrfsTree {
                     break;
                 }
                 long childLogical = LittleEndian.getInt64(block, ptrPos + BtrfsConstants.KEY_SIZE);
-                scan(childLogical, visitor, depth + 1);
+                scan(childLogical, level - 1, visitor, visited);
             }
         }
+    }
+
+    /**
+     * A copy of the leaf item's data bytes, or {@code null} if its {@code (offset, size)} pair does
+     * not lie within the block. Both fields are u32 on disk; the arithmetic is arranged so that a
+     * value near 2^31 cannot wrap the sum negative and slip past the check.
+     */
+    private static byte[] itemData(byte[] block, int itemPos) {
+        int dataOff = (int) LittleEndian.getUInt32(block, itemPos + BtrfsConstants.KEY_SIZE);
+        int dataLen = (int) LittleEndian.getUInt32(block, itemPos + BtrfsConstants.KEY_SIZE + 4);
+        int room = block.length - BtrfsConstants.HEADER_SIZE;
+        if (dataOff < 0 || dataLen < 0 || dataLen > room || dataOff > room - dataLen) {
+            return null;
+        }
+        int start = BtrfsConstants.HEADER_SIZE + dataOff;
+        return Arrays.copyOfRange(block, start, start + dataLen);
     }
 
     /**
@@ -173,17 +225,11 @@ public class BtrfsTree {
             return path.peek().keyAt(path.peek().slot);
         }
 
-        /** A copy of the current item's data bytes (only when {@link #valid()}). */
+        /** A copy of the current item's data bytes (only when {@link #valid()}); empty if corrupt. */
         public byte[] data() {
             Frame f = path.peek();
-            int itemPos = BtrfsConstants.HEADER_SIZE + f.slot * BtrfsConstants.ITEM_SIZE;
-            int dataOff = (int) LittleEndian.getUInt32(f.block, itemPos + BtrfsConstants.KEY_SIZE);
-            int dataLen = (int) LittleEndian.getUInt32(f.block, itemPos + BtrfsConstants.KEY_SIZE + 4);
-            int start = BtrfsConstants.HEADER_SIZE + dataOff;
-            if (start < 0 || dataLen < 0 || start + dataLen > f.block.length) {
-                return new byte[0]; // corrupt item pointer
-            }
-            return Arrays.copyOfRange(f.block, start, start + dataLen);
+            byte[] data = itemData(f.block, BtrfsConstants.HEADER_SIZE + f.slot * BtrfsConstants.ITEM_SIZE);
+            return data != null ? data : new byte[0];
         }
 
         /** Advances to the next item in key order. */
@@ -198,8 +244,9 @@ public class BtrfsTree {
 
         private void seek(long rootLogical, BtrfsDiskKey target) throws IOException {
             long logical = rootLogical;
+            int expectedLevel = -1; // the root may sit at any level
             while (true) {
-                Frame f = push(logical);
+                Frame f = push(logical, expectedLevel);
                 if (f.level == 0) {
                     f.slot = lowerBound(f, target); // first leaf item >= target (may be nrItems)
                     normalize();                    // spill to the next leaf if this one is all < target
@@ -208,6 +255,7 @@ public class BtrfsTree {
                 int child = childSlot(f, target); // deepest child whose range can hold target
                 f.slot = child + 1;                // resume at the following child when we return here
                 logical = f.childAt(child);
+                expectedLevel = f.level - 1;
             }
         }
 
@@ -227,16 +275,16 @@ public class BtrfsTree {
                     continue;
                 }
                 long child = f.childAt(f.slot);
-                f.slot++;              // advance the parent so we take the next child after this subtree
-                push(child).slot = 0;  // descend the child's left edge
+                f.slot++;                         // advance the parent so we take the next child after this subtree
+                push(child, f.level - 1).slot = 0; // descend the child's left edge
             }
         }
 
-        private Frame push(long logical) throws IOException {
-            if (path.size() > MAX_LEVEL) {
+        private Frame push(long logical, int expectedLevel) throws IOException {
+            if (path.size() >= BtrfsConstants.MAX_LEVEL) {
                 throw new IOException("btrfs tree too deep (corrupt?)");
             }
-            Frame f = new Frame(readBlock(logical));
+            Frame f = new Frame(readBlock(logical, expectedLevel));
             path.push(f);
             return f;
         }

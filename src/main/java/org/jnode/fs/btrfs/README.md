@@ -10,16 +10,21 @@ Fedora/openSUSE roots, which default to btrfs — jnode-fs previously had no btr
 **Supported**
 - Single-device volumes (VM images are single-device). Multi-device / RAID is rejected cleanly.
 - Superblock → `sys_chunk_array` bootstrap → chunk tree → logical→physical address map.
-- Root tree → FS tree(s); descent into real subvolumes (root, home, …). **Snapshots** (ROOT_ITEM
-  with a non-zero `parent_uuid`) are **skipped by default** — a snapper/openSUSE root has dozens,
-  each ≈ a full copy sharing storage, which would explode the tree; re-enable with
-  `setDescendSnapshots(true)` or `-Dorg.jnode.fs.btrfs.descendSnapshots=true`.
+- Root tree → FS tree(s); descent into real subvolumes (root, home, …). **Read-only snapshots**
+  (ROOT_ITEM with a non-zero `parent_uuid` *and* `BTRFS_ROOT_SUBVOL_RDONLY` set — what snapper and
+  Timeshift create) are **skipped by default** — a snapper/openSUSE root has dozens, each ≈ a full
+  copy sharing storage, which would explode the tree; each skip is logged at info, and
+  `setDescendSnapshots(true)` or `-Dorg.jnode.fs.btrfs.descendSnapshots=true` includes them. A
+  *writable* snapshot is a regular subvolume and is always descended: after `snapper rollback` or a
+  Timeshift restore the live root itself is one, and gating on `parent_uuid` alone would hide the
+  whole filesystem.
 - FS-tree walk: `INODE_ITEM` (size, mode, atime/ctime/mtime/otime), `DIR_INDEX` (directory
   entries) — one scan per subvolume builds its inode/children maps. **Symlinks** are recognised
   (`BtrfsNode.isSymlink()` / `getSymlinkTarget()`) and never followed. Entries expose the standard
   jnode timestamp interfaces (`getLastModified`, `FSEntryCreated`/`LastAccessed`/`LastChanged`) and
-  a volume-unique id (`subvolId-objectId` — plain objectids repeat in every subvolume). The volume
-  label (`mkfs.btrfs -L`) is reported via `getVolumeName()`.
+  a volume-unique id, `subvolId-objectId-dirIndex` (objectids repeat in every subvolume, and hard
+  links share one, so the entry's `DIR_INDEX` offset is appended — as `Ext2Entry`/`XfsEntry` do with
+  their directory record id). The volume label (`mkfs.btrfs -L`) is reported via `getVolumeName()`.
 - Extended attributes: `BtrfsEntry.getAttributes()` (mirroring `XfsEntry`) returns each inode's
   xattrs — SELinux context, `user.*`, POSIX ACLs, capabilities, btrfs per-file properties — via a
   keyed `XATTR_ITEM` lookup. Values are always inline; hash-colliding names packed into one item
@@ -37,6 +42,17 @@ Fedora/openSUSE roots, which default to btrfs — jnode-fs previously had no btr
 - crc32c checksums: verification is **optional** and off by default (read-only browsing doesn't need
   it); `setVerifyChecksums(true)` / `-Dorg.jnode.fs.btrfs.verifyChecksums=true` checks every metadata
   block as it's read (crc32c only; other csum types are skipped, not rejected).
+
+**Untrusted input.** The image is treated as hostile (it is typically a forensic capture or a VM
+disk nobody vetted). Every tree block's header must carry the address it was read from and a level
+below `BTRFS_MAX_LEVEL`; a child's level must be exactly one below its parent's; a full scan keeps a
+visited set and refuses to read a block twice, so a self-pointing node or a DAG of shared children
+(which a depth limit alone would walk `fan-out^depth` times) fails after one read per block. Leaf
+item `(offset, size)` pairs, `sys_chunk_array`/`CHUNK_ITEM` stripes and `EXTENT_DATA` fixed fields
+are bounds-checked before use, with the arithmetic arranged so a u32 near 2^31 cannot wrap past the
+check. All of it surfaces as `IOException` (→ `FileSystemException` at mount), never an unchecked
+exception, and the cases are pinned by `BtrfsRobustnessTest` over hand-built images
+(`SyntheticBtrfs`).
 
 **Not supported (degrades, does not crash)**
 - Writing (read-only), multi-device/RAID, and the extent/free-space trees (not needed to walk the

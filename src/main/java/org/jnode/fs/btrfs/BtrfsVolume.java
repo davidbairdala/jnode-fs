@@ -3,12 +3,12 @@ package org.jnode.fs.btrfs;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import org.jnode.util.LittleEndian;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A mounted (read-only) btrfs volume: superblock → chunk map → root tree → FS tree(s). Presents the
@@ -20,16 +20,20 @@ import org.jnode.util.LittleEndian;
  */
 public class BtrfsVolume {
 
+    private static final Logger log = LoggerFactory.getLogger(BtrfsVolume.class);
+
     /** One directory entry as stored in the FS tree. */
     static final class DirEntry {
         final String name;
         final long childObjectId;
         final int locationType; // INODE_ITEM (a file/dir) or ROOT_ITEM (a subvolume)
+        final long dirIndex;    // the DIR_INDEX key offset: unique per entry within its directory
 
-        DirEntry(String name, long childObjectId, int locationType) {
+        DirEntry(String name, long childObjectId, int locationType, long dirIndex) {
             this.name = name;
             this.childObjectId = childObjectId;
             this.locationType = locationType;
+            this.dirIndex = dirIndex;
         }
     }
 
@@ -60,6 +64,19 @@ public class BtrfsVolume {
         }
     }
 
+    /** What the reader keeps of one subvolume's {@code ROOT_ITEM}. */
+    private static final class RootInfo {
+        final long bytenr;              // the subvolume's FS tree root block
+        final long dirId;               // its root directory inode
+        final boolean readOnlySnapshot; // skipped unless snapshot descent is enabled
+
+        RootInfo(long bytenr, long dirId, boolean readOnlySnapshot) {
+            this.bytenr = bytenr;
+            this.dirId = dirId;
+            this.readOnlySnapshot = readOnlySnapshot;
+        }
+    }
+
     /** The scanned state of one subvolume's FS tree. */
     private static final class Subvol {
         final long rootDirId;
@@ -75,18 +92,18 @@ public class BtrfsVolume {
     private final BtrfsSuperblock sb;
     private final BtrfsChunkMap chunkMap;
     private final BtrfsTree tree;
-    /** subvolume root objectid -> its FS tree bytenr (from the root tree's ROOT_ITEMs). */
-    private final Map<Long, Long> subvolBytenr = new HashMap<Long, Long>();
-    /** subvolumes that are snapshots (ROOT_ITEM.parent_uuid != 0) — skipped by default. */
-    private final Set<Long> snapshotSubvols = new HashSet<Long>();
+    /** subvolume root objectid -> its ROOT_ITEM essentials (from one pass over the root tree). */
+    private final Map<Long, RootInfo> roots = new HashMap<Long, RootInfo>();
     /** lazily scanned subvolumes, keyed by root objectid. */
     private final Map<Long, Subvol> scanned = new HashMap<Long, Subvol>();
     /**
-     * Whether to descend snapshot subvolumes. Off by default: a snapper/openSUSE root has dozens of
-     * read-only snapshots (each ≈ a full root copy sharing storage via CoW), so descending them all
-     * explodes the tree and massively overstates usage. Real subvolumes (root, home) are always
-     * descended — only snapshots are gated. Override with {@code -Dorg.jnode.fs.btrfs.descendSnapshots=true}
-     * or {@link #setDescendSnapshots(boolean)}.
+     * Whether to descend read-only snapshot subvolumes. Off by default: a snapper/openSUSE root has
+     * dozens of read-only snapshots (each ≈ a full root copy sharing storage via CoW), so descending
+     * them all explodes the tree and massively overstates usage. Real subvolumes (root, home) are
+     * always descended, and so is a <em>writable</em> snapshot — after {@code snapper rollback} or a
+     * Timeshift restore the live root <em>is</em> a writable snapshot, and skipping it would hide the
+     * whole filesystem. Override with {@code -Dorg.jnode.fs.btrfs.descendSnapshots=true} or
+     * {@link #setDescendSnapshots(boolean)}.
      */
     private boolean descendSnapshots = Boolean.getBoolean("org.jnode.fs.btrfs.descendSnapshots");
 
@@ -102,7 +119,7 @@ public class BtrfsVolume {
             setVerifyChecksums(true);
         }
         readRootTree();
-        if (!subvolBytenr.containsKey(BtrfsConstants.OBJECTID_FS_TREE)) {
+        if (!roots.containsKey(BtrfsConstants.OBJECTID_FS_TREE)) {
             throw new IOException("btrfs has no FS tree");
         }
     }
@@ -119,8 +136,8 @@ public class BtrfsVolume {
      */
     public BtrfsNode getRoot() throws IOException {
         Subvol top = subvol(BtrfsConstants.OBJECTID_FS_TREE);
-        return new BtrfsNode(this, BtrfsConstants.OBJECTID_FS_TREE, top.rootDirId, "",
-                infoOrDir(top, top.rootDirId));
+        return new BtrfsNode(this, BtrfsConstants.OBJECTID_FS_TREE, top.rootDirId, BtrfsNode.NO_DIR_INDEX,
+                "", infoOrDir(top, top.rootDirId));
     }
 
     private static InodeInfo infoOrDir(Subvol sv, long objectId) {
@@ -139,22 +156,24 @@ public class BtrfsVolume {
         for (DirEntry e : entries) {
             if (e.locationType == BtrfsConstants.TYPE_ROOT_ITEM) {
                 // a nested subvolume: descend into its own FS tree
-                Long bytenr = subvolBytenr.get(e.childObjectId);
-                if (bytenr == null) {
+                RootInfo root = roots.get(e.childObjectId);
+                if (root == null) {
                     continue; // subvolume not found (e.g. deleted) — skip
                 }
-                if (!descendSnapshots && snapshotSubvols.contains(e.childObjectId)) {
-                    continue; // a snapshot (parent_uuid set) — skipped unless descent is enabled
+                if (!descendSnapshots && root.readOnlySnapshot) {
+                    log.info("Skipping read-only btrfs snapshot '{}' (subvolume {}); enable snapshot descent to include it",
+                            e.name, e.childObjectId);
+                    continue;
                 }
                 Subvol child = subvol(e.childObjectId);
-                result.add(new BtrfsNode(this, e.childObjectId, child.rootDirId, e.name,
+                result.add(new BtrfsNode(this, e.childObjectId, child.rootDirId, e.dirIndex, e.name,
                         infoOrDir(child, child.rootDirId)));
             } else {
                 InodeInfo info = sv.inodes.get(e.childObjectId);
                 if (info == null) {
                     continue;
                 }
-                result.add(new BtrfsNode(this, dir.getSubvolId(), e.childObjectId, e.name, info));
+                result.add(new BtrfsNode(this, dir.getSubvolId(), e.childObjectId, e.dirIndex, e.name, info));
             }
         }
         return result;
@@ -162,7 +181,7 @@ public class BtrfsVolume {
 
     // ---- scanning ----
 
-    /** Collects every subvolume's FS-tree bytenr from the root tree's ROOT_ITEMs. */
+    /** Collects every subvolume's ROOT_ITEM essentials (tree bytenr, root dirid, snapshot flag). */
     private void readRootTree() throws IOException {
         tree.scanLeaves(sb.getRootTreeLogical(), (key, data) -> {
             if (key.getType() == BtrfsConstants.TYPE_ROOT_ITEM) {
@@ -170,18 +189,22 @@ public class BtrfsVolume {
                 // subvolumes are FS_TREE (5) and objectids >= FIRST_FREE (256); skip the special
                 // internal trees (extent/dev/csum/...) whose ids are < 256 and != 5
                 if (id == BtrfsConstants.OBJECTID_FS_TREE || id >= BtrfsConstants.OBJECTID_FIRST_FREE) {
-                    long bytenr = LittleEndian.getInt64(data, BtrfsConstants.ROOT_ITEM_BYTENR);
-                    // keep the highest generation if duplicated (later ROOT_ITEM wins by scan order)
-                    subvolBytenr.put(id, bytenr);
-                    if (isSnapshotRootItem(data)) {
-                        snapshotSubvols.add(id);
+                    if (data.length < BtrfsConstants.ROOT_ITEM_BYTENR + 8) {
+                        return; // too short to even name its tree
                     }
+                    long bytenr = LittleEndian.getInt64(data, BtrfsConstants.ROOT_ITEM_BYTENR);
+                    long dirId = LittleEndian.getInt64(data, BtrfsConstants.ROOT_ITEM_DIRID);
+                    if (dirId == 0) {
+                        dirId = BtrfsConstants.OBJECTID_FIRST_FREE;
+                    }
+                    // keep the highest generation if duplicated (later ROOT_ITEM wins by scan order)
+                    roots.put(id, new RootInfo(bytenr, dirId, isReadOnlySnapshot(data)));
                 }
             }
         });
     }
 
-    /** Enables (or disables) descending into snapshot subvolumes. Default: snapshots are skipped. */
+    /** Enables (or disables) descending into read-only snapshot subvolumes. Default: skipped. */
     public void setDescendSnapshots(boolean descend) {
         this.descendSnapshots = descend;
     }
@@ -195,21 +218,27 @@ public class BtrfsVolume {
     }
 
     /**
-     * A ROOT_ITEM is a snapshot iff its {@code parent_uuid} is non-zero — i.e. it was created as a
-     * snapshot/clone of another subvolume. Regular subvolumes ({@code btrfs subvolume create}, e.g.
-     * root/home) leave it all-zero, so they are never treated as snapshots.
+     * A ROOT_ITEM is a <em>read-only snapshot</em> iff its {@code parent_uuid} is non-zero (it was
+     * created as a snapshot of another subvolume) <em>and</em> {@code BTRFS_ROOT_SUBVOL_RDONLY} is
+     * set in its flags. snapper and Timeshift snapshots are both read-only. A snapshot that was made
+     * writable — which is what a rolled-back or restored root is — carries the parent_uuid but not
+     * the flag, and is treated as a regular subvolume. Regular subvolumes ({@code btrfs subvolume
+     * create}, e.g. root/home) have an all-zero parent_uuid, so they are never treated as snapshots.
      */
-    static boolean isSnapshotRootItem(byte[] data) {
+    static boolean isReadOnlySnapshot(byte[] data) {
         int off = BtrfsConstants.ROOT_ITEM_PARENT_UUID;
         if (data.length < off + BtrfsConstants.UUID_SIZE) {
             return false; // pre-uuid root_item (very old btrfs): nothing to distinguish
         }
+        boolean hasParent = false;
         for (int i = 0; i < BtrfsConstants.UUID_SIZE; i++) {
             if (data[off + i] != 0) {
-                return true;
+                hasParent = true;
+                break;
             }
         }
-        return false;
+        long flags = LittleEndian.getInt64(data, BtrfsConstants.ROOT_ITEM_FLAGS);
+        return hasParent && (flags & BtrfsConstants.ROOT_SUBVOL_RDONLY) != 0;
     }
 
     /** Scans (once) a subvolume's FS tree into inode + children maps. */
@@ -218,16 +247,18 @@ public class BtrfsVolume {
         if (existing != null) {
             return existing;
         }
-        Long bytenr = subvolBytenr.get(rootObjectId);
-        if (bytenr == null) {
+        RootInfo root = roots.get(rootObjectId);
+        if (root == null) {
             throw new IOException("Unknown btrfs subvolume " + rootObjectId);
         }
-        long rootDirId = rootDirIdOf(rootObjectId);
-        Subvol sv = new Subvol(rootDirId);
+        Subvol sv = new Subvol(root.dirId);
         scanned.put(rootObjectId, sv); // insert before scanning to guard against self-referential loops
-        tree.scanLeaves(bytenr, (key, data) -> {
+        tree.scanLeaves(root.bytenr, (key, data) -> {
             int type = key.getType();
             if (type == BtrfsConstants.TYPE_INODE_ITEM) {
+                if (data.length < BtrfsConstants.INODE_MODE_OFF + 4) {
+                    return; // truncated inode item
+                }
                 long size = LittleEndian.getInt64(data, BtrfsConstants.INODE_SIZE_OFF);
                 int mode = (int) LittleEndian.getUInt32(data, BtrfsConstants.INODE_MODE_OFF);
                 int fmt = mode & BtrfsConstants.S_IFMT;
@@ -238,27 +269,13 @@ public class BtrfsVolume {
                         timespecMs(data, BtrfsConstants.INODE_MTIME),
                         timespecMs(data, BtrfsConstants.INODE_OTIME)));
             } else if (type == BtrfsConstants.TYPE_DIR_INDEX) {
-                DirEntry e = parseDirEntry(data);
+                DirEntry e = parseDirEntry(data, key.getOffset());
                 if (e != null) {
                     sv.children.computeIfAbsent(key.getObjectId(), k -> new ArrayList<DirEntry>()).add(e);
                 }
             }
         });
         return sv;
-    }
-
-    /** The root directory inode id of a subvolume (from its ROOT_ITEM.dirid; defaults to 256). */
-    private long rootDirIdOf(long rootObjectId) throws IOException {
-        long[] dirId = {BtrfsConstants.OBJECTID_FIRST_FREE};
-        tree.scanLeaves(sb.getRootTreeLogical(), (key, data) -> {
-            if (key.getType() == BtrfsConstants.TYPE_ROOT_ITEM && key.getObjectId() == rootObjectId) {
-                long d = LittleEndian.getInt64(data, BtrfsConstants.ROOT_ITEM_DIRID);
-                if (d != 0) {
-                    dirId[0] = d;
-                }
-            }
-        });
-        return dirId[0];
     }
 
     /**
@@ -295,7 +312,7 @@ public class BtrfsVolume {
         return sec * 1_000L + nsec / 1_000_000L;
     }
 
-    private static DirEntry parseDirEntry(byte[] data) {
+    private static DirEntry parseDirEntry(byte[] data, long dirIndex) {
         if (data.length < BtrfsConstants.DIR_NAME) {
             return null;
         }
@@ -307,7 +324,7 @@ public class BtrfsVolume {
         }
         String name = new String(data, BtrfsConstants.DIR_NAME, nameLen,
                 java.nio.charset.StandardCharsets.UTF_8);
-        return new DirEntry(name, childId, locationType);
+        return new DirEntry(name, childId, locationType, dirIndex);
     }
 
     // ---- file content ----
@@ -325,11 +342,11 @@ public class BtrfsVolume {
     }
 
     long subvolBytenr(long subvolId) throws IOException {
-        Long b = subvolBytenr.get(subvolId);
-        if (b == null) {
+        RootInfo root = roots.get(subvolId);
+        if (root == null) {
             throw new IOException("Unknown subvolume " + subvolId);
         }
-        return b;
+        return root.bytenr;
     }
 
     int sectorSize() {
