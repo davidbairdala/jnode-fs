@@ -106,6 +106,13 @@ final class BtrfsFileContent {
                 long diskNumBytes = LittleEndian.getInt64(data, BtrfsConstants.EXTENT_DISK_NUM_BYTES);
                 long dataOffset = LittleEndian.getInt64(data, BtrfsConstants.EXTENT_DATA_OFFSET);
                 long numBytes = LittleEndian.getInt64(data, BtrfsConstants.EXTENT_NUM_BYTES);
+                // all four are u64 on disk; read signed, a negative value is either corrupt or so
+                // large no device holds it -- and a negative data_offset would index before the extent
+                if (dataOffset < 0 || numBytes < 0 || diskNumBytes < 0 || ram < 0) {
+                    throw new IOException("btrfs EXTENT_DATA item for inode " + objectId + " at " + fileOffset
+                            + " has an out-of-range field (data_offset " + dataOffset + ", num_bytes " + numBytes
+                            + ", disk_num_bytes " + diskNumBytes + ", ram_bytes " + ram + ")");
+                }
                 extents.add(new Extent(fileOffset, numBytes, ram, type, compression, diskBytenr,
                         diskNumBytes, dataOffset, null));
             }
@@ -196,6 +203,14 @@ final class BtrfsFileContent {
 
     /** The bytes of one extent (inline data or the on-disk range), decompressed if compressed. */
     private static byte[] materialise(BtrfsVolume vol, Extent e) throws IOException {
+        // Every buffer below is sized from on-disk fields, so bound them first. btrfs never writes a
+        // compressed extent larger than 128 KiB either side (BTRFS_MAX_UNCOMPRESSED for ram_bytes,
+        // BTRFS_MAX_COMPRESSED for disk_num_bytes); anything bigger is corrupt, not a huge file.
+        if (e.compression != BtrfsConstants.COMPRESS_NONE
+                && (e.ramBytes < 0 || e.ramBytes > MAX_EXTENT_BYTES)) {
+            throw new IOException("btrfs compressed extent claims ram_bytes " + e.ramBytes
+                    + " (max " + MAX_EXTENT_BYTES + ")");
+        }
         if (e.type == BtrfsConstants.EXTENT_TYPE_INLINE) {
             return decompress(e.compression, e.inlineData, (int) e.ramBytes, vol.sectorSize());
         }
@@ -205,6 +220,11 @@ final class BtrfsFileContent {
         }
         if (e.diskBytenr == 0) {
             return new byte[0]; // an explicit hole
+        }
+        // only compressed extents reach here (uncompressed ones are read by range, never whole)
+        if (e.diskNumBytes < 0 || e.diskNumBytes > MAX_EXTENT_BYTES) {
+            throw new IOException("btrfs compressed extent claims disk_num_bytes " + e.diskNumBytes
+                    + " (max " + MAX_EXTENT_BYTES + ")");
         }
         long physical = vol.chunkMap().toPhysical(e.diskBytenr);
         byte[] raw = vol.reader().read(physical, (int) e.diskNumBytes);
@@ -223,7 +243,7 @@ final class BtrfsFileContent {
             case BtrfsConstants.COMPRESS_NONE:
                 return input;
             case BtrfsConstants.COMPRESS_ZLIB:
-                return inflateZlib(input, Math.max(ramBytes, input.length));
+                return inflateZlib(input, Math.max(ramBytes, MAX_EXTENT_BYTES));
             case BtrfsConstants.COMPRESS_ZSTD:
                 return inflateZstd(input, ramBytes);
             case BtrfsConstants.COMPRESS_LZO:
@@ -373,14 +393,20 @@ final class BtrfsFileContent {
         return p;
     }
 
-    private static byte[] inflateZlib(byte[] input, int hint) throws IOException {
+    /**
+     * Inflate a zlib extent, producing at most {@code limit} bytes: a well-formed extent never
+     * decodes to more than 128&nbsp;KiB, and the cap keeps a deflate bomb (≈1000:1) from turning a
+     * small on-disk extent into a huge allocation.
+     */
+    private static byte[] inflateZlib(byte[] input, int limit) throws IOException {
         Inflater inflater = new Inflater();
         try {
             inflater.setInput(input);
-            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(Math.max(hint, 64));
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(
+                    Math.min(Math.max(limit, 64), MAX_EXTENT_BYTES));
             byte[] chunk = new byte[8192];
-            while (!inflater.finished()) {
-                int n = inflater.inflate(chunk);
+            while (!inflater.finished() && out.size() < limit) {
+                int n = inflater.inflate(chunk, 0, Math.min(chunk.length, limit - out.size()));
                 if (n == 0) {
                     if (inflater.needsInput() || inflater.needsDictionary()) {
                         break;

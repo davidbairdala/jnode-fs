@@ -9,6 +9,7 @@ import org.jnode.fs.FSDirectory;
 import org.jnode.fs.FSEntry;
 import org.jnode.fs.FSEntryLastAccessed;
 import org.jnode.fs.FileSystemTestUtils;
+import org.jnode.util.LittleEndian;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
@@ -67,6 +68,8 @@ public class BtrfsMetadataTest {
         System.arraycopy(BtrfsConstants.MAGIC, 0, sb, BtrfsConstants.SB_MAGIC, BtrfsConstants.MAGIC.length);
         byte[] label = "SpaceMap Test".getBytes("UTF-8");
         System.arraycopy(label, 0, sb, BtrfsConstants.SB_LABEL, label.length); // NUL-terminated by the zero fill
+        LittleEndian.setInt32(sb, BtrfsConstants.SB_SECTORSIZE, 4096); // sizes the superblock
+        LittleEndian.setInt32(sb, BtrfsConstants.SB_NODESIZE, 16384);  // check requires
 
         BtrfsBlockReader reader = (offset, dst, off, length) -> {
             for (int i = 0; i < length; i++) {

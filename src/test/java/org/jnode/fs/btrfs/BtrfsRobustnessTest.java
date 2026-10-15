@@ -8,12 +8,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.zip.Deflater;
 
 import org.jnode.driver.block.FileDevice;
 import org.jnode.fs.FSDirectory;
 import org.jnode.fs.FSEntry;
 import org.jnode.fs.FSFile;
 import org.jnode.fs.FileSystemException;
+import org.jnode.util.LittleEndian;
 import org.junit.Test;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -305,6 +307,150 @@ public class BtrfsRobustnessTest {
         BtrfsTree.Cursor c = vol.tree().search(leaf, new BtrfsDiskKey(ROOT_DIR, BtrfsConstants.TYPE_DIR_INDEX, 0));
         assertTrue(c.valid());
         assertEquals(0, c.data().length);
+    }
+
+    /**
+     * The cursor's forward walk over a tree whose levels 3 -> 0 each point twice at the same child.
+     * {@code leafItems} fill the one shared leaf; the FS tree is otherwise unreachable, so this goes
+     * through the keyed path ({@code collectExtents}) without the full scan seeing it first.
+     */
+    private static SyntheticBtrfs sharedChildrenUnderTheCursor(SyntheticBtrfs img, long leaf) {
+        long chunkTree = img.chunkTree();
+        long prev = leaf;
+        for (int level = 1; level <= 3; level++) {
+            long n = img.allocBlock();
+            // the first pointer's key is <= the search key, so the descent takes it and the forward
+            // walk then reaches the second pointer -- the same block again
+            img.node(n, level, Arrays.asList(
+                    new SyntheticBtrfs.KeyPtr(300, BtrfsConstants.TYPE_EXTENT_DATA, 0, prev),
+                    new SyntheticBtrfs.KeyPtr(300, BtrfsConstants.TYPE_EXTENT_DATA, 1, prev)));
+            prev = n;
+        }
+        img.superblock(img.rootTree(SyntheticBtrfs.rootItem(FS, prev, ROOT_DIR, 0, false)), chunkTree);
+        return img;
+    }
+
+    @Test
+    public void cursorRejectsATreeWhoseNodesShareChildren() throws Exception {
+        SyntheticBtrfs img = new SyntheticBtrfs();
+        long leaf = img.allocBlock();
+        img.leaf(leaf, Arrays.asList(SyntheticBtrfs.regularExtent(300, 0, 0, 4096)));
+        sharedChildrenUnderTheCursor(img, leaf);
+
+        BtrfsVolume vol = new BtrfsVolume(img.reader());
+        assertIOException("iterating a DAG with the cursor",
+                io(() -> BtrfsFileContent.collectExtents(vol, FS, 300)));
+        assertEquals("the shared leaf is entered once, not 2^3 times", 1, img.readsOf(leaf));
+    }
+
+    @Test
+    public void cursorRejectsSharedEmptyLeavesInsteadOfSpinning() throws Exception {
+        // empty shared leaves never yield a key, so only a block-level guard can stop the walk
+        SyntheticBtrfs img = new SyntheticBtrfs();
+        long leaf = img.allocBlock();
+        img.leaf(leaf, Arrays.<SyntheticBtrfs.Item>asList());
+        sharedChildrenUnderTheCursor(img, leaf);
+
+        BtrfsVolume vol = new BtrfsVolume(img.reader());
+        assertIOException("iterating a DAG of empty leaves",
+                io(() -> BtrfsFileContent.collectExtents(vol, FS, 300)));
+    }
+
+    /** A volume whose only file (inode 300, 4096 bytes) is backed by {@code extent}. */
+    private static BtrfsNode fileWithExtent(SyntheticBtrfs.Item extent) throws IOException {
+        SyntheticBtrfs img = new SyntheticBtrfs();
+        long chunkTree = img.chunkTree();
+        long fs = img.allocBlock();
+        img.leaf(fs, Arrays.asList(
+                SyntheticBtrfs.dir(ROOT_DIR),
+                SyntheticBtrfs.fileEntry(ROOT_DIR, 2, "f", 300),
+                SyntheticBtrfs.file(300, 4096),
+                extent));
+        img.superblock(img.rootTree(SyntheticBtrfs.rootItem(FS, fs, ROOT_DIR, 0, false)), chunkTree);
+        return child(new BtrfsVolume(img.reader()).getRoot(), "f");
+    }
+
+    @Test
+    public void negativeDataOffsetIsAnIOException() throws Exception {
+        // on a hole this used to index before the (empty) extent; on a data extent it would have
+        // read the disk bytes in front of it
+        SyntheticBtrfs.Item hole = SyntheticBtrfs.regularExtent(300, 0, 0, 4096);
+        LittleEndian.setInt64(hole.data, BtrfsConstants.EXTENT_DATA_OFFSET, -4096L);
+        BtrfsNode f = fileWithExtent(hole);
+        assertIOException("a hole with data_offset -4096", io(() -> f.read(0, new byte[16], 0, 16)));
+
+        SyntheticBtrfs.Item data = SyntheticBtrfs.regularExtent(300, 0, SyntheticBtrfs.DATA_AREA, 4096);
+        LittleEndian.setInt64(data.data, BtrfsConstants.EXTENT_DATA_OFFSET, -4096L);
+        BtrfsNode g = fileWithExtent(data);
+        assertIOException("a data extent with data_offset -4096", io(() -> g.read(0, new byte[16], 0, 16)));
+    }
+
+    @Test
+    public void compressedExtentLargerThanBtrfsAllowsIsAnIOException() throws Exception {
+        // ram_bytes / disk_num_bytes size the decompression buffers: past 128 KiB they're corrupt,
+        // and must be refused before anything is allocated
+        SyntheticBtrfs.Item hugeRam = SyntheticBtrfs.regularExtent(300, 0, SyntheticBtrfs.DATA_AREA, 4096);
+        hugeRam.data[BtrfsConstants.EXTENT_COMPRESSION] = BtrfsConstants.COMPRESS_ZSTD;
+        LittleEndian.setInt64(hugeRam.data, BtrfsConstants.EXTENT_RAM_BYTES, 0x7FFF0000L);
+        BtrfsNode f = fileWithExtent(hugeRam);
+        assertIOException("ram_bytes 0x7FFF0000", io(() -> f.read(0, new byte[16], 0, 16)));
+
+        SyntheticBtrfs.Item hugeDisk = SyntheticBtrfs.regularExtent(300, 0, SyntheticBtrfs.DATA_AREA, 4096);
+        hugeDisk.data[BtrfsConstants.EXTENT_COMPRESSION] = BtrfsConstants.COMPRESS_LZO;
+        LittleEndian.setInt64(hugeDisk.data, BtrfsConstants.EXTENT_DISK_NUM_BYTES, 0x7FFF0000L);
+        BtrfsNode g = fileWithExtent(hugeDisk);
+        assertIOException("disk_num_bytes 0x7FFF0000", io(() -> g.read(0, new byte[16], 0, 16)));
+    }
+
+    @Test
+    public void zlibOutputIsCappedAtTheExtentLimit() throws Exception {
+        // 4 MiB of zeros deflates to a few KiB: a bomb in miniature. Decoding stops at 128 KiB.
+        Deflater deflater = new Deflater();
+        deflater.setInput(new byte[4 * 1024 * 1024]);
+        deflater.finish();
+        byte[] buf = new byte[64 * 1024];
+        int len = deflater.deflate(buf);
+        deflater.end();
+        byte[] out = BtrfsFileContent.decompress(BtrfsConstants.COMPRESS_ZLIB, Arrays.copyOf(buf, len), 4096);
+        assertTrue("decoded " + out.length + " bytes", out.length <= 128 * 1024);
+        assertTrue("still decodes what the extent needs", out.length >= 4096);
+    }
+
+    /** A valid one-file volume, then {@code tweak} applied to its superblock bytes. */
+    private static SyntheticBtrfs volumeWithSuperblockField(int field, int value) {
+        SyntheticBtrfs img = new SyntheticBtrfs();
+        long chunkTree = img.chunkTree();
+        img.superblock(img.rootTree(SyntheticBtrfs.rootItem(FS, simpleFsTree(img, "f"), ROOT_DIR, 0, false)),
+                chunkTree);
+        LittleEndian.setInt32(img.image, (int) BtrfsConstants.SUPERBLOCK_OFFSET + field, value);
+        return img;
+    }
+
+    @Test
+    public void superblockSizesOutsideBtrfsLimitsAreRejectedAtMount() throws Exception {
+        int[][] cases = {
+            {BtrfsConstants.SB_SYS_CHUNK_ARRAY_SIZE, 0xFFFFFFF0}, // used to wrap -> IllegalArgumentException
+            {BtrfsConstants.SB_SYS_CHUNK_ARRAY_SIZE, 2049},
+            {BtrfsConstants.SB_NODESIZE, 0xFFFFFFFF},             // used to be NegativeArraySizeException
+            {BtrfsConstants.SB_NODESIZE, 6000},                   // not a power of two
+            {BtrfsConstants.SB_NODESIZE, 128 * 1024},             // above 64 KiB
+            {BtrfsConstants.SB_SECTORSIZE, 0},
+            {BtrfsConstants.SB_SECTORSIZE, 8192},                 // now larger than the 4 KiB node size
+        };
+        for (int[] c : cases) {
+            SyntheticBtrfs img = volumeWithSuperblockField(c[0], c[1]);
+            String what = String.format("superblock field 0x%x = 0x%x", c[0], c[1]);
+            assertIOException(what, io(() -> new BtrfsVolume(img.reader())));
+        }
+
+        // and through the FileSystemType, the documented checked failure
+        File f = volumeWithSuperblockField(BtrfsConstants.SB_NODESIZE, 0xFFFFFFFF).toFile();
+        try (FileDevice device = new FileDevice(f, "r")) {
+            new BtrfsFileSystemType().create(device, true);
+            fail("expected a FileSystemException");
+        } catch (FileSystemException expected) {
+            // not a NegativeArraySizeException
+        }
     }
 
     // ---- efficiency ----

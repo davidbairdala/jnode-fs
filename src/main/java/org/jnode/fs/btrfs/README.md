@@ -45,12 +45,15 @@ Fedora/openSUSE roots, which default to btrfs — jnode-fs previously had no btr
 
 **Untrusted input.** The image is treated as hostile (it is typically a forensic capture or a VM
 disk nobody vetted). Every tree block's header must carry the address it was read from and a level
-below `BTRFS_MAX_LEVEL`; a child's level must be exactly one below its parent's; a full scan keeps a
-visited set and refuses to read a block twice, so a self-pointing node or a DAG of shared children
-(which a depth limit alone would walk `fan-out^depth` times) fails after one read per block. Leaf
-item `(offset, size)` pairs, `sys_chunk_array`/`CHUNK_ITEM` stripes and `EXTENT_DATA` fixed fields
-are bounds-checked before use, with the arithmetic arranged so a u32 near 2^31 cannot wrap past the
-check. All of it surfaces as `IOException` (→ `FileSystemException` at mount), never an unchecked
+below `BTRFS_MAX_LEVEL`; a child's level must be exactly one below its parent's; both the full scan
+and the keyed cursor keep a visited set and refuse to enter a block twice, so a self-pointing node or
+a DAG of shared children (which a depth limit alone would walk `fan-out^depth` times) fails after one
+read per block. The superblock's sector size, node size and `sys_chunk_array_size` must lie within
+the kernel's limits before anything is sized from them. Leaf item `(offset, size)` pairs,
+`sys_chunk_array`/`CHUNK_ITEM` stripes and `EXTENT_DATA` fields are bounds-checked before use (the
+arithmetic arranged so a u32 near 2^31 cannot wrap past the check; a negative `data_offset` is
+refused), and a compressed extent claiming more than btrfs's 128 KiB on either side is rejected
+before a buffer is allocated — zlib output is capped there too, so a deflate bomb stays small. All of it surfaces as `IOException` (→ `FileSystemException` at mount), never an unchecked
 exception, and the cases are pinned by `BtrfsRobustnessTest` over hand-built images
 (`SyntheticBtrfs`).
 

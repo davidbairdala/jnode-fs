@@ -23,6 +23,37 @@ public class BtrfsSuperblock {
         if (!isBtrfs()) {
             throw new IOException("Not a btrfs volume (magic mismatch)");
         }
+        validate();
+    }
+
+    /**
+     * Rejects superblock fields that would otherwise size buffers or arrays later on. The ranges are
+     * the ones the kernel's {@code btrfs_validate_super} enforces: a power-of-two sector size from
+     * 4&nbsp;KiB to 64&nbsp;KiB, a power-of-two node size from the sector size to 64&nbsp;KiB, and a
+     * {@code sys_chunk_array} no larger than its fixed 2&nbsp;KiB slot.
+     */
+    private void validate() throws IOException {
+        long sectorSize = LittleEndian.getUInt32(data, BtrfsConstants.SB_SECTORSIZE);
+        long nodeSize = LittleEndian.getUInt32(data, BtrfsConstants.SB_NODESIZE);
+        long sysChunkArraySize = LittleEndian.getUInt32(data, BtrfsConstants.SB_SYS_CHUNK_ARRAY_SIZE);
+        if (!isPowerOfTwoIn(sectorSize, MIN_BLOCK, MAX_BLOCK)) {
+            throw new IOException("btrfs superblock: invalid sector size " + sectorSize);
+        }
+        if (!isPowerOfTwoIn(nodeSize, sectorSize, MAX_BLOCK)) {
+            throw new IOException("btrfs superblock: invalid node size " + nodeSize
+                    + " (sector size " + sectorSize + ")");
+        }
+        if (sysChunkArraySize > BtrfsConstants.SYS_CHUNK_ARRAY_MAX) {
+            throw new IOException("btrfs superblock: sys_chunk_array_size " + sysChunkArraySize
+                    + " exceeds " + BtrfsConstants.SYS_CHUNK_ARRAY_MAX);
+        }
+    }
+
+    private static final long MIN_BLOCK = 4096;
+    private static final long MAX_BLOCK = 65536;
+
+    private static boolean isPowerOfTwoIn(long v, long min, long max) {
+        return v >= min && v <= max && (v & (v - 1)) == 0;
     }
 
     public boolean isBtrfs() {

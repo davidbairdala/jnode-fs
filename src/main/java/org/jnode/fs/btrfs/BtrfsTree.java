@@ -18,7 +18,7 @@ import org.jnode.util.LittleEndian;
  *
  * <p>The reader treats the image as untrusted. Every block's header must carry the address it was
  * read from and a level below {@code BTRFS_MAX_LEVEL}; a child's level must be exactly one less than
- * its parent's; and a full scan refuses to visit the same block twice. Together these turn a corrupt
+ * its parent's; and neither a full scan nor a cursor will enter the same block twice. Together these turn a corrupt
  * or crafted tree (a self-pointing node, a DAG whose shared children would multiply the walk, a
  * pointer into the wrong block) into an {@link IOException} after a bounded number of reads.</p>
  *
@@ -210,6 +210,12 @@ public class BtrfsTree {
      */
     public final class Cursor {
         private final ArrayDeque<Frame> path = new ArrayDeque<Frame>(); // head = current (deepest) frame
+        /**
+         * Every block this cursor has descended into. A forward walk enters each block of a sound
+         * tree once, so a repeat means nodes share a child — a DAG that would otherwise be iterated
+         * fan-out^depth times (or, with empty shared leaves, spun through without ever yielding).
+         */
+        private final Set<Long> visited = new HashSet<Long>();
 
         private Cursor() {
         }
@@ -283,6 +289,9 @@ public class BtrfsTree {
         private Frame push(long logical, int expectedLevel) throws IOException {
             if (path.size() >= BtrfsConstants.MAX_LEVEL) {
                 throw new IOException("btrfs tree too deep (corrupt?)");
+            }
+            if (!visited.add(logical)) {
+                throw new IOException("btrfs tree block at logical " + logical + " reached twice (corrupt tree)");
             }
             Frame f = new Frame(readBlock(logical, expectedLevel));
             path.push(f);
